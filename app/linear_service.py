@@ -130,7 +130,10 @@ async def get_issue_details(issue_id: str) -> dict:
 
 
 async def get_all_team_issues() -> list[dict]:
-    """Fetch all non-completed/cancelled issues from the SPO123 team with their current status.
+    """Fetch all recent issues from the SPO123 team with their current status.
+
+    Includes ALL statuses (Triage, Interested, Hold, Approved, Declined, Done)
+    so the poller can detect transitions to terminal states like Declined.
 
     Returns a list of dicts with id, identifier, state_name, and updated_at.
     Used by the polling system to detect status changes.
@@ -140,9 +143,6 @@ async def get_all_team_issues() -> list[dict]:
         team(id: $teamId) {
             issues(
                 first: 100
-                filter: {
-                    state: { type: { nin: ["completed", "canceled"] } }
-                }
                 orderBy: updatedAt
             ) {
                 nodes {
