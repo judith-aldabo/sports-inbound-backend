@@ -60,6 +60,57 @@ def get_weekly_stats() -> dict:
         return {"total": 0, "interested": 0, "hold": 0, "declined": 0, "new": 0}
 
 
+def append_form_submission(data: dict) -> dict:
+    """Append a new form submission row to the response sheet.
+
+    Returns {"ok": True, "row": row_number} on success.
+    """
+    service = _get_sheets_service()
+    if not service:
+        return {"ok": False, "message": "Sheets service not available"}
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    row = [
+        now,                               # Timestamp
+        data.get("email", ""),             # Email
+        data.get("full_name", ""),         # Full Name
+        data.get("role", ""),              # Role
+        data.get("organization", ""),      # Organization
+        data.get("sport", ""),             # Sport
+        data.get("athlete_name", ""),      # Athlete/Team Name
+        data.get("social_media", ""),      # Social Media
+        data.get("followers_range", ""),   # Followers
+        data.get("partnership_type", ""),  # Partnership Type
+        data.get("proposal_summary", ""),  # Proposal Summary
+        data.get("previous_partnerships", ""),  # Previous Partnerships
+        data.get("budget_range", ""),      # Budget
+        data.get("timeline", ""),          # Timeline
+        data.get("additional_notes", ""),  # Additional Notes
+        "",                                # (reserved)
+        "",                                # (reserved)
+        "New",                             # Status
+        "",                                # Next Action
+        now.split(" ")[0],                 # Date Reviewed
+    ]
+
+    try:
+        result = service.spreadsheets().values().append(
+            spreadsheetId=RESPONSE_SHEET_ID,
+            range="Form Responses 1!A:T",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [row]},
+        ).execute()
+        updated_range = result.get("updates", {}).get("updatedRange", "")
+        # Extract row number from range like "Form Responses 1!A42:T42"
+        row_num = updated_range.split("!")[-1].split(":")[0].lstrip("ABCDEFGHIJKLMNOPQRST") if updated_range else ""
+        logger.info("Appended form submission for %s at row %s", data.get("email", ""), row_num)
+        return {"ok": True, "row": row_num}
+    except Exception as e:
+        logger.error("Failed to append form submission: %s", e)
+        return {"ok": False, "message": str(e)}
+
+
 def update_row_status(
     row_number: str,
     status: str,

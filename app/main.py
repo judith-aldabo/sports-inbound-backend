@@ -29,7 +29,7 @@ from app.slack_service import (
     update_message,
     schedule_reminder,
 )
-from app.sheets_service import update_row_status, get_weekly_stats
+from app.sheets_service import update_row_status, get_weekly_stats, append_form_submission
 from app.gmail_service import send_email
 from app.email_templates import (
     approved_email,
@@ -64,6 +64,61 @@ app.add_middleware(
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# API: Custom form submission (branded landing page)
+# ---------------------------------------------------------------------------
+@app.post("/api/form-submission")
+async def api_form_submission(request: Request):
+    """Receive form data from the branded partnership form and write to Google Sheet.
+
+    Also posts to #sports-inbound with buttons and sends an auto-acknowledge email.
+    """
+    body = await request.json()
+
+    full_name = body.get("full_name", "")
+    email_addr = body.get("email", "")
+
+    # 1. Write to Google Sheet
+    sheet_result = append_form_submission(body)
+    row_num = sheet_result.get("row", "")
+
+    # 2. Post to #sports-inbound with buttons
+    blocks = build_submission_message(
+        full_name=full_name,
+        email=email_addr,
+        organization=body.get("organization", ""),
+        sport=body.get("sport", ""),
+        athlete_property=body.get("athlete_name", ""),
+        market="",
+        reach=body.get("followers_range", ""),
+        partnership_type=body.get("partnership_type", ""),
+        budget=body.get("budget_range", ""),
+        socials=body.get("social_media", ""),
+        used_before="",
+        pitch=body.get("proposal_summary", ""),
+        sheet_row=str(row_num),
+        sheet_url=f"https://docs.google.com/spreadsheets/d/{RESPONSE_SHEET_ID}",
+    )
+
+    slack_result = await post_message(
+        channel=SPORTS_INBOUND_CHANNEL,
+        blocks=blocks,
+        text=f"New partnership form submission from {full_name} <{email_addr}>",
+    )
+
+    # 3. Send auto-acknowledge email
+    ack = submission_acknowledge_email(full_name)
+    email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"])
+
+    return {
+        "ok": True,
+        "sheet": sheet_result.get("ok", False),
+        "slack": slack_result.get("ok", False),
+        "email_sent": email_result.get("sent", False),
+        "row": row_num,
+    }
 
 
 # ---------------------------------------------------------------------------
