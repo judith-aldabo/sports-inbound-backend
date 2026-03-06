@@ -129,6 +129,70 @@ async def get_issue_details(issue_id: str) -> dict:
     }
 
 
+async def get_all_team_issues() -> list[dict]:
+    """Fetch all non-completed/cancelled issues from the SPO123 team with their current status.
+
+    Returns a list of dicts with id, identifier, state_name, and updated_at.
+    Used by the polling system to detect status changes.
+    """
+    query = """
+    query TeamIssues($teamId: String!) {
+        team(id: $teamId) {
+            issues(
+                first: 100
+                filter: {
+                    state: { type: { nin: ["completed", "canceled"] } }
+                }
+                orderBy: updatedAt
+            ) {
+                nodes {
+                    id
+                    identifier
+                    title
+                    updatedAt
+                    state { name type }
+                }
+            }
+        }
+    }
+    """
+    if not LINEAR_API_KEY:
+        logger.warning("LINEAR_API_KEY not set — cannot poll")
+        return []
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                GRAPHQL_URL,
+                headers={
+                    "Authorization": LINEAR_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={"query": query, "variables": {"teamId": LINEAR_TEAM_ID}},
+                timeout=15.0,
+            )
+            data = resp.json()
+
+        if "errors" in data:
+            logger.error("Linear get_all_team_issues failed: %s", data["errors"])
+            return []
+
+        nodes = data.get("data", {}).get("team", {}).get("issues", {}).get("nodes", [])
+        return [
+            {
+                "id": n["id"],
+                "identifier": n["identifier"],
+                "title": n.get("title", ""),
+                "state_name": n.get("state", {}).get("name", ""),
+                "updated_at": n.get("updatedAt", ""),
+            }
+            for n in nodes
+        ]
+    except Exception as e:
+        logger.error("Error polling Linear issues: %s", e)
+        return []
+
+
 async def create_linear_webhook(webhook_url: str) -> dict:
     """Create a Linear webhook to receive issue status change events for the Sports Inbound team."""
     query = """

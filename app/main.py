@@ -32,7 +32,7 @@ from app.slack_service import (
 )
 from app.sheets_service import update_row_status, get_weekly_stats, append_form_submission
 from app.gmail_service import send_email
-from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook
+from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook, get_all_team_issues
 from app.email_templates import (
     approved_email,
     decline_pitch_email,
@@ -53,6 +53,12 @@ app = FastAPI(title="Sports Inbound Backend")
 # Key: pending_id, Value: {action, params, task, channel, ts, original_blocks}
 _pending_actions: dict[str, dict] = {}
 
+# In-memory store for Linear issue statuses (polling system)
+# Key: issue_id, Value: status_name
+_issue_status_cache: dict[str, str] = {}
+_poller_initialized = False
+POLL_INTERVAL_SECONDS = 60
+
 # Disable CORS. Do not remove this for full-stack development.
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +67,163 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def start_linear_poller():
+    """Start the background Linear poller on app startup."""
+    asyncio.create_task(_linear_poll_loop())
+    logger.info("Linear poller background task started (every %ds)", POLL_INTERVAL_SECONDS)
+
+
+async def _linear_poll_loop():
+    """Background loop: poll Linear for status changes every POLL_INTERVAL_SECONDS."""
+    global _poller_initialized
+    # Wait a few seconds for app to fully start
+    await asyncio.sleep(5)
+
+    while True:
+        try:
+            await _poll_linear_status_changes()
+        except Exception as e:
+            logger.error("Linear poller error: %s", e)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _poll_linear_status_changes():
+    """Fetch all SPO123 issues, detect status changes, and trigger email logic."""
+    global _poller_initialized
+
+    issues = await get_all_team_issues()
+    if not issues:
+        return
+
+    for issue in issues:
+        issue_id = issue["id"]
+        current_status = issue["state_name"]
+        previous_status = _issue_status_cache.get(issue_id)
+
+        # Update cache
+        _issue_status_cache[issue_id] = current_status
+
+        # On first run, just populate the cache — don't fire emails
+        if not _poller_initialized:
+            continue
+
+        # If status changed, process it
+        if previous_status and previous_status != current_status:
+            logger.info(
+                "Poller detected status change: %s (%s) %s -> %s",
+                issue["identifier"], issue["title"], previous_status, current_status,
+            )
+            await _handle_status_change(issue_id, previous_status, current_status)
+
+    if not _poller_initialized:
+        _poller_initialized = True
+        logger.info("Linear poller initialized with %d issues in cache", len(_issue_status_cache))
+
+
+async def _handle_status_change(issue_id: str, old_status: str, new_status: str):
+    """Process a detected status change — same logic as webhook_linear."""
+    issue = await get_issue_details(issue_id)
+    if not issue.get("ok"):
+        logger.error("Poller: failed to fetch issue details for %s", issue_id)
+        return
+
+    identifier = issue.get("identifier", "")
+    title = issue.get("title", "")
+    description = issue.get("description", "")
+    issue_url = issue.get("url", "")
+    labels = issue.get("labels", [])
+
+    recipient_email, recipient_name = _parse_email_from_description(description)
+    if not recipient_name:
+        recipient_name = _parse_name_from_title(title)
+
+    if not recipient_email:
+        logger.warning("Poller: no email found in issue %s — skipping email", identifier)
+        await post_message(
+            channel=SPORTS_INBOUND_CHANNEL,
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":arrows_counterclockwise: *{identifier}* moved to *{new_status}*\n"
+                            f"_{title}_\n"
+                            f":warning: No email address found — manual action needed.\n"
+                            f"<{issue_url}|View in Linear>",
+                },
+            }],
+            text=f"{identifier} moved to {new_status} (no email found)",
+        )
+        return
+
+    email_result = {"sent": False}
+    slack_text = ""
+    is_pitch = "Email Pitch" in labels or title.startswith("[Pitch]")
+
+    if new_status == "Interested":
+        if is_pitch:
+            prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
+            template = approved_email(recipient_name, _parse_subject_from_title(title), form_url=prefilled_url)
+        else:
+            template = interested_email(recipient_name)
+        email_result = send_email(
+            to=recipient_email,
+            subject=template["subject"],
+            body=template["body"],
+            cc=template.get("cc", ""),
+        )
+        slack_text = f":white_check_mark: *{identifier}* → *Interested*"
+
+    elif new_status == "Declined":
+        if is_pitch:
+            template = decline_pitch_email(recipient_name, _parse_subject_from_title(title))
+        else:
+            template = decline_submission_email(recipient_name)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
+
+    elif new_status == "Approved":
+        prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
+        subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
+        template = approved_email(recipient_name, subject, form_url=prefilled_url)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        slack_text = f":tada: *{identifier}* → *Approved*"
+
+    else:
+        # Other status changes — just notify Slack
+        await post_message(
+            channel=SPORTS_INBOUND_CHANNEL,
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":arrows_counterclockwise: *{identifier}* moved to *{new_status}*\n"
+                            f"_{title}_\n"
+                            f"<{issue_url}|View in Linear>",
+                },
+            }],
+            text=f"{identifier} moved to {new_status}",
+        )
+        return
+
+    # Post Slack notification for email-triggering status changes
+    email_status = recipient_email if email_result.get("sent") else f"{recipient_email} (failed)"
+    await post_message(
+        channel=SPORTS_INBOUND_CHANNEL,
+        blocks=[{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{slack_text}\n"
+                        f"_{title}_\n"
+                        f":envelope: Email sent to {email_status}\n"
+                        f"<{issue_url}|View in Linear>",
+            },
+        }],
+        text=f"{identifier} → {new_status}, email to {recipient_email}",
+    )
 
 
 @app.get("/healthz")
