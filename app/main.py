@@ -59,6 +59,10 @@ _issue_status_cache: dict[str, str] = {}
 _poller_initialized = False
 POLL_INTERVAL_SECONDS = 60
 
+# Dedup: track which issue+status emails we've already sent this session
+# Prevents duplicate emails during blue-green deployments or retries
+_processed_transitions: set[str] = set()
+
 # Disable CORS. Do not remove this for full-stack development.
 app.add_middleware(
     CORSMiddleware,
@@ -158,6 +162,13 @@ async def _poll_linear_status_changes():
 
 async def _handle_status_change(issue_id: str, old_status: str, new_status: str):
     """Process a detected status change — same logic as webhook_linear."""
+    # Dedup: skip if we've already processed this exact transition
+    dedup_key = f"{issue_id}:{new_status}"
+    if dedup_key in _processed_transitions:
+        logger.info("Skipping duplicate transition for %s -> %s (already processed)", issue_id, new_status)
+        return
+    _processed_transitions.add(dedup_key)
+
     issue = await get_issue_details(issue_id)
     if not issue.get("ok"):
         logger.error("Poller: failed to fetch issue details for %s", issue_id)
