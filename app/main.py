@@ -91,13 +91,54 @@ async def _linear_poll_loop():
 
 
 async def _poll_linear_status_changes():
-    """Fetch all SPO123 issues, detect status changes, and trigger email logic."""
+    """Fetch all SPO123 issues, detect status changes, and trigger email logic.
+
+    On first run (cold start / after Fly.io suspension), we populate the cache
+    AND check for recently-updated issues in actionable statuses. This catches
+    changes that happened while the machine was suspended.
+    """
     global _poller_initialized
 
     issues = await get_all_team_issues()
     if not issues:
         return
 
+    EMAIL_TRIGGER_STATUSES = {"Interested", "Declined", "Approved"}
+    # Track which issues we process on cold start to avoid duplicates
+    processed_on_init: set[str] = set()
+
+    if not _poller_initialized:
+        # Cold start: populate cache and check for recent actionable changes
+        now = datetime.now(timezone.utc)
+        for issue in issues:
+            issue_id = issue["id"]
+            current_status = issue["state_name"]
+            _issue_status_cache[issue_id] = current_status
+
+            # If issue is in an email-triggering status and was updated recently
+            # (within 5 min), process it — it likely changed while we were suspended
+            if current_status in EMAIL_TRIGGER_STATUSES and issue.get("updated_at"):
+                try:
+                    updated_at = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
+                    age_seconds = (now - updated_at).total_seconds()
+                    if age_seconds < 300:  # Updated within last 5 minutes
+                        logger.info(
+                            "Cold start: processing recently-updated issue %s (%s) in %s (updated %ds ago)",
+                            issue["identifier"], issue["title"], current_status, int(age_seconds),
+                        )
+                        await _handle_status_change(issue_id, "unknown", current_status)
+                        processed_on_init.add(issue_id)
+                except (ValueError, TypeError) as e:
+                    logger.warning("Could not parse updatedAt for %s: %s", issue["identifier"], e)
+
+        _poller_initialized = True
+        logger.info(
+            "Linear poller initialized with %d issues in cache (%d processed on cold start)",
+            len(_issue_status_cache), len(processed_on_init),
+        )
+        return
+
+    # Normal polling: detect status changes since last poll
     for issue in issues:
         issue_id = issue["id"]
         current_status = issue["state_name"]
@@ -106,10 +147,6 @@ async def _poll_linear_status_changes():
         # Update cache
         _issue_status_cache[issue_id] = current_status
 
-        # On first run, just populate the cache — don't fire emails
-        if not _poller_initialized:
-            continue
-
         # If status changed, process it
         if previous_status and previous_status != current_status:
             logger.info(
@@ -117,10 +154,6 @@ async def _poll_linear_status_changes():
                 issue["identifier"], issue["title"], previous_status, current_status,
             )
             await _handle_status_change(issue_id, previous_status, current_status)
-
-    if not _poller_initialized:
-        _poller_initialized = True
-        logger.info("Linear poller initialized with %d issues in cache", len(_issue_status_cache))
 
 
 async def _handle_status_change(issue_id: str, old_status: str, new_status: str):
