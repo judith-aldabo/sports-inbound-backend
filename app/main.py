@@ -815,10 +815,23 @@ def _parse_email_from_description(description: str) -> tuple[str, str]:
     """Extract reply-to email and recipient name from a Linear issue description.
 
     Returns (email, name). Falls back to empty strings if not found.
+
+    Linear auto-formats emails as markdown links, so we need to handle:
+      - Plain: Reply to: user@example.com
+      - Markdown: *Reply to: *[*user@example.com*](<mailto:user@example.com>)
+      - Table: | **Email** | [user@example.com](<mailto:user@example.com>) |
     """
-    # Look for "Reply to: email" pattern (strip trailing markdown chars like *)
-    email_match = re.search(r"\*?Reply to:\*?\s*(\S+@[\w.\-]+)", description)
-    email = email_match.group(1).rstrip("*") if email_match else ""
+    email = ""
+
+    # Strategy 1: Look for mailto: links (most reliable — Linear always adds these)
+    mailto_match = re.search(r"mailto:([^)\s>]+)", description)
+    if mailto_match:
+        email = mailto_match.group(1).strip()
+
+    # Strategy 2: Fallback to plain Reply to: pattern
+    if not email:
+        email_match = re.search(r"Reply to:\s*\*?\[?\*?(\S+@[\w.\-]+)", description)
+        email = email_match.group(1).rstrip("*]") if email_match else ""
 
     # For form submissions: look for Name field in table
     name_match = re.search(r"\*\*Name\*\*\s*\|\s*(.+?)(?:\s*\||\n)", description)
