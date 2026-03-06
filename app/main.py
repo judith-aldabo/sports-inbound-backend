@@ -32,7 +32,7 @@ from app.slack_service import (
 )
 from app.sheets_service import update_row_status, get_weekly_stats, append_form_submission
 from app.gmail_service import send_email
-from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook, get_all_team_issues
+from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook, get_all_team_issues, check_email_sent_marker, add_email_sent_marker
 from app.email_templates import (
     approved_email,
     decline_pitch_email,
@@ -162,11 +162,19 @@ async def _poll_linear_status_changes():
 
 async def _handle_status_change(issue_id: str, old_status: str, new_status: str):
     """Process a detected status change — same logic as webhook_linear."""
-    # Dedup: skip if we've already processed this exact transition
+    # Dedup layer 1: in-memory (same machine, same session)
     dedup_key = f"{issue_id}:{new_status}"
     if dedup_key in _processed_transitions:
-        logger.info("Skipping duplicate transition for %s -> %s (already processed)", issue_id, new_status)
+        logger.info("Skipping duplicate transition for %s -> %s (already processed in-memory)", issue_id, new_status)
         return
+
+    # Dedup layer 2: cross-machine via Linear comments (survives restarts & multi-machine)
+    if new_status in {"Interested", "Declined", "Approved"}:
+        if await check_email_sent_marker(issue_id, new_status):
+            logger.info("Skipping duplicate transition for %s -> %s (marker found in Linear)", issue_id, new_status)
+            _processed_transitions.add(dedup_key)
+            return
+
     _processed_transitions.add(dedup_key)
 
     issue = await get_issue_details(issue_id)
@@ -251,6 +259,10 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             text=f"{identifier} moved to {new_status}",
         )
         return
+
+    # Mark as sent in Linear for cross-machine dedup
+    if email_result.get("sent"):
+        await add_email_sent_marker(issue_id, new_status)
 
     # Post Slack notification for email-triggering status changes
     email_status = recipient_email if email_result.get("sent") else f"{recipient_email} (failed)"

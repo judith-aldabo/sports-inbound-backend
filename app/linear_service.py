@@ -193,6 +193,63 @@ async def get_all_team_issues() -> list[dict]:
         return []
 
 
+async def check_email_sent_marker(issue_id: str, status: str) -> bool:
+    """Check if an '[Auto] Email sent' comment already exists for this status on the issue.
+
+    Used for cross-machine dedup — prevents duplicate emails when Fly.io runs
+    multiple machines during blue-green deployments.
+    """
+    query = """
+    query IssueComments($id: String!) {
+        issue(id: $id) {
+            comments(first: 20) {
+                nodes { body }
+            }
+        }
+    }
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                GRAPHQL_URL,
+                headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
+                json={"query": query, "variables": {"id": issue_id}},
+                timeout=10.0,
+            )
+            data = resp.json()
+        comments = data.get("data", {}).get("issue", {}).get("comments", {}).get("nodes", [])
+        marker = f"[Auto] Email sent: {status}"
+        return any(marker in c.get("body", "") for c in comments)
+    except Exception as e:
+        logger.error("Error checking email sent marker for %s: %s", issue_id, e)
+        return False  # On error, allow sending (better duplicate than lost email)
+
+
+async def add_email_sent_marker(issue_id: str, status: str) -> None:
+    """Add an '[Auto] Email sent' comment to the issue for dedup tracking."""
+    mutation = """
+    mutation CommentCreate($input: CommentCreateInput!) {
+        commentCreate(input: $input) { success }
+    }
+    """
+    variables = {
+        "input": {
+            "issueId": issue_id,
+            "body": f"[Auto] Email sent: {status}",
+        }
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                GRAPHQL_URL,
+                headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
+                json={"query": mutation, "variables": variables},
+                timeout=10.0,
+            )
+    except Exception as e:
+        logger.error("Error adding email sent marker for %s: %s", issue_id, e)
+
+
 async def create_linear_webhook(webhook_url: str) -> dict:
     """Create a Linear webhook to receive issue status change events for the Sports Inbound team."""
     query = """
