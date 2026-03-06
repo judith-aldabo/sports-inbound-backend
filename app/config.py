@@ -19,8 +19,10 @@ LINEAR_TEAM_ID = os.getenv("LINEAR_TEAM_ID", "ab0cda08-cb13-4958-8e6d-75eccb3ad6
 LINEAR_LABEL_EMAIL_PITCH = os.getenv("LINEAR_LABEL_EMAIL_PITCH", "f693709d-ff63-4114-bcec-36d247c0765b")
 LINEAR_LABEL_FORM_SUBMISSION = os.getenv("LINEAR_LABEL_FORM_SUBMISSION", "df69e701-250a-499a-bd92-033ecdf91cca")
 
-# Gmail — uses domain-wide delegation via GDRIVE_JSON_KEY service account
-# No separate Gmail credentials needed; the service account impersonates sports@
+# Gmail OAuth (sports@eightsleep.com)
+GMAIL_OAUTH_REFRESH_TOKEN = os.getenv("GMAIL_OAUTH_REFRESH_TOKEN", "")
+GMAIL_OAUTH_CLIENT_ID = os.getenv("GMAIL_OAUTH_CLIENT_ID", "")
+GMAIL_OAUTH_CLIENT_SECRET = os.getenv("GMAIL_OAUTH_CLIENT_SECRET", "")
 
 # Form link
 FORM_URL = "https://forms.gle/vCeH3KPpEuXR5m5E9"
