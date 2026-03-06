@@ -83,11 +83,10 @@ def append_form_submission(data: dict) -> dict:
         data.get("partnership_type", ""),  # Partnership Type
         data.get("proposal_summary", ""),  # Proposal Summary
         data.get("previous_partnerships", ""),  # Previous Partnerships
-        data.get("budget_range", ""),      # Budget
+        data.get("market", ""),            # Market
+        data.get("slept_on_pod", ""),      # Slept on Pod before?
         data.get("timeline", ""),          # Timeline
         data.get("additional_notes", ""),  # Additional Notes
-        "",                                # (reserved)
-        "",                                # (reserved)
         "New",                             # Status
         "",                                # Next Action
         now.split(" ")[0],                 # Date Reviewed

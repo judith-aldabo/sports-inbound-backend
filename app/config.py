@@ -13,8 +13,14 @@ SPORTS_INBOUND_CHANNEL = os.getenv("SPORTS_INBOUND_CHANNEL", "C0AKR508SDN")
 GDRIVE_JSON_KEY = os.getenv("GDRIVE_JSON_KEY", "")
 RESPONSE_SHEET_ID = "16xR18SLY5NmTqQYgttR4k_zq6iFRDuLGhIKslR6ioLQ"
 
-# Gmail (sports@eightsleep.com) - will be configured when credentials are available
-GMAIL_CREDENTIALS_JSON = os.getenv("GMAIL_CREDENTIALS_JSON", "")
+# Linear
+LINEAR_API_KEY = os.getenv("LINEAR_API_KEY", "")
+LINEAR_TEAM_ID = os.getenv("LINEAR_TEAM_ID", "ab0cda08-cb13-4958-8e6d-75eccb3ad639")
+LINEAR_LABEL_EMAIL_PITCH = os.getenv("LINEAR_LABEL_EMAIL_PITCH", "f693709d-ff63-4114-bcec-36d247c0765b")
+LINEAR_LABEL_FORM_SUBMISSION = os.getenv("LINEAR_LABEL_FORM_SUBMISSION", "df69e701-250a-499a-bd92-033ecdf91cca")
+
+# Gmail — uses domain-wide delegation via GDRIVE_JSON_KEY service account
+# No separate Gmail credentials needed; the service account impersonates sports@
 
 # Form link
 FORM_URL = "https://forms.gle/vCeH3KPpEuXR5m5E9"

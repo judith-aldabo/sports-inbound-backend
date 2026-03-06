@@ -4,6 +4,7 @@ import json
 import hashlib
 import hmac
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,7 @@ from app.config import (
     UNDO_WINDOW_SECONDS,
     RESPONSE_SHEET_ID,
 )
-from app.slack_blocks import build_pitch_message, build_submission_message
+from app.slack_blocks import build_pitch_message, build_submission_message, build_pitch_message_readonly, build_submission_message_readonly
 from app.slack_service import (
     post_message,
     post_thread_confirmation,
@@ -31,6 +32,7 @@ from app.slack_service import (
 )
 from app.sheets_service import update_row_status, get_weekly_stats, append_form_submission
 from app.gmail_service import send_email
+from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook
 from app.email_templates import (
     approved_email,
     decline_pitch_email,
@@ -84,22 +86,53 @@ async def api_form_submission(request: Request):
     sheet_result = append_form_submission(body)
     row_num = sheet_result.get("row", "")
 
-    # 2. Post to #sports-inbound with buttons
-    blocks = build_submission_message(
+    # 2. Create Linear issue
+    organization = body.get("organization", "")
+    sport = body.get("sport", "")
+    athlete_property = body.get("athlete_name", "")
+    market = body.get("market", "")
+    reach = body.get("followers_range", "")
+    partnership_type = body.get("partnership_type", "")
+    socials = body.get("social_media", "")
+    used_before = body.get("slept_on_pod", "")
+    pitch = body.get("proposal_summary", "")
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{RESPONSE_SHEET_ID}"
+
+    linear_result = await create_submission_issue(
         full_name=full_name,
         email=email_addr,
-        organization=body.get("organization", ""),
-        sport=body.get("sport", ""),
-        athlete_property=body.get("athlete_name", ""),
-        market="",
-        reach=body.get("followers_range", ""),
-        partnership_type=body.get("partnership_type", ""),
-        budget=body.get("budget_range", ""),
-        socials=body.get("social_media", ""),
-        used_before="",
-        pitch=body.get("proposal_summary", ""),
+        organization=organization,
+        sport=sport,
+        athlete_property=athlete_property,
+        market=market,
+        reach=reach,
+        partnership_type=partnership_type,
+        socials=socials,
+        used_before=used_before,
+        pitch=pitch,
         sheet_row=str(row_num),
-        sheet_url=f"https://docs.google.com/spreadsheets/d/{RESPONSE_SHEET_ID}",
+        sheet_url=sheet_url,
+    )
+    linear_url = linear_result.get("url", "")
+    linear_id = linear_result.get("identifier", "")
+
+    # 3. Post read-only notification to #sports-inbound (with Linear link)
+    blocks = build_submission_message_readonly(
+        full_name=full_name,
+        email=email_addr,
+        organization=organization,
+        sport=sport,
+        athlete_property=athlete_property,
+        market=market,
+        reach=reach,
+        partnership_type=partnership_type,
+        socials=socials,
+        used_before=used_before,
+        pitch=pitch,
+        sheet_row=str(row_num),
+        sheet_url=sheet_url,
+        linear_url=linear_url,
+        linear_id=linear_id,
     )
 
     slack_result = await post_message(
@@ -108,7 +141,7 @@ async def api_form_submission(request: Request):
         text=f"New partnership form submission from {full_name} <{email_addr}>",
     )
 
-    # 3. Send auto-acknowledge email
+    # 4. Send auto-acknowledge email
     ack = submission_acknowledge_email(full_name)
     email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"])
 
@@ -116,6 +149,8 @@ async def api_form_submission(request: Request):
         "ok": True,
         "sheet": sheet_result.get("ok", False),
         "slack": slack_result.get("ok", False),
+        "linear": linear_result.get("ok", False),
+        "linear_url": linear_url,
         "email_sent": email_result.get("sent", False),
         "row": row_num,
     }
@@ -151,13 +186,27 @@ async def webhook_new_email(request: Request):
     route = body.get("route", "Direct to sports@")
     preview = body.get("preview", "")
 
-    blocks = build_pitch_message(
+    # 1. Create Linear issue
+    linear_result = await create_pitch_issue(
+        sender_name=sender_name,
+        sender_email=sender_email,
+        subject=subject,
+        route=route,
+        preview=preview,
+    )
+    linear_url = linear_result.get("url", "")
+    linear_id = linear_result.get("identifier", "")
+
+    # 2. Post read-only notification to #sports-inbound (with Linear link)
+    blocks = build_pitch_message_readonly(
         sender_name=sender_name,
         sender_email=sender_email,
         subject=subject,
         date=date,
         route=route,
         preview=preview,
+        linear_url=linear_url,
+        linear_id=linear_id,
     )
 
     result = await post_message(
@@ -170,6 +219,8 @@ async def webhook_new_email(request: Request):
         "ok": result.get("ok", False),
         "ts": result.get("ts"),
         "channel": result.get("channel"),
+        "linear": linear_result.get("ok", False),
+        "linear_url": linear_url,
     }
 
 
@@ -199,8 +250,8 @@ async def webhook_new_submission(request: Request):
         "https://docs.google.com/spreadsheets/d/16xR18SLY5NmTqQYgttR4k_zq6iFRDuLGhIKslR6ioLQ",
     )
 
-    # 1. Post to #sports-inbound with buttons
-    blocks = build_submission_message(
+    # 1. Create Linear issue
+    linear_result = await create_submission_issue(
         full_name=full_name,
         email=email_addr,
         organization=organization,
@@ -209,12 +260,32 @@ async def webhook_new_submission(request: Request):
         market=market,
         reach=reach,
         partnership_type=partnership_type,
-        budget=budget,
         socials=socials,
         used_before=used_before,
         pitch=pitch,
         sheet_row=sheet_row,
         sheet_url=sheet_url,
+    )
+    linear_url = linear_result.get("url", "")
+    linear_id = linear_result.get("identifier", "")
+
+    # 2. Post read-only notification to #sports-inbound (with Linear link)
+    blocks = build_submission_message_readonly(
+        full_name=full_name,
+        email=email_addr,
+        organization=organization,
+        sport=sport,
+        athlete_property=athlete_property,
+        market=market,
+        reach=reach,
+        partnership_type=partnership_type,
+        socials=socials,
+        used_before=used_before,
+        pitch=pitch,
+        sheet_row=sheet_row,
+        sheet_url=sheet_url,
+        linear_url=linear_url,
+        linear_id=linear_id,
     )
 
     slack_result = await post_message(
@@ -223,13 +294,15 @@ async def webhook_new_submission(request: Request):
         text=f"New partnership form submission from {full_name} <{email_addr}>",
     )
 
-    # 2. Send auto-acknowledge email to submitter
+    # 3. Send auto-acknowledge email to submitter
     ack = submission_acknowledge_email(full_name)
     email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"])
 
     return {
         "ok": slack_result.get("ok", False),
         "ts": slack_result.get("ts"),
+        "linear": linear_result.get("ok", False),
+        "linear_url": linear_url,
         "email_sent": email_result.get("sent", False),
         "email_message": email_result.get("message", ""),
     }
@@ -569,6 +642,207 @@ async def webhook_weekly_digest(request: Request):
     )
 
     return {"ok": result.get("ok", False), "stats": stats}
+
+
+# ---------------------------------------------------------------------------
+# Linear webhook: status changes trigger automated emails
+# ---------------------------------------------------------------------------
+
+def _parse_email_from_description(description: str) -> tuple[str, str]:
+    """Extract reply-to email and recipient name from a Linear issue description.
+
+    Returns (email, name). Falls back to empty strings if not found.
+    """
+    # Look for "Reply to: email" pattern (strip trailing markdown chars like *)
+    email_match = re.search(r"\*?Reply to:\*?\s*(\S+@[\w.\-]+)", description)
+    email = email_match.group(1).rstrip("*") if email_match else ""
+
+    # For form submissions: look for Name field in table
+    name_match = re.search(r"\*\*Name\*\*\s*\|\s*(.+?)(?:\s*\||\n)", description)
+    if name_match:
+        return email, name_match.group(1).strip()
+
+    # For pitches: look for From field
+    from_match = re.search(r"\*\*From:\*\*\s*(.+?)\s*<", description)
+    if from_match:
+        return email, from_match.group(1).strip()
+
+    # Fallback: try title parsing
+    return email, ""
+
+
+def _parse_name_from_title(title: str) -> str:
+    """Extract name from Linear issue title like '[Form] Name — Org (Sport)' or '[Pitch] Name — Subject'."""
+    match = re.match(r"\[(?:Form|Pitch)\]\s*(.+?)\s*[—\-]", title)
+    return match.group(1).strip() if match else ""
+
+
+def _parse_subject_from_title(title: str) -> str:
+    """Extract subject from pitch title like '[Pitch] Name — Subject'."""
+    match = re.match(r"\[Pitch\]\s*.+?\s*[—\-]\s*(.+)", title)
+    return match.group(1).strip() if match else ""
+
+
+@app.post("/webhook/linear")
+async def webhook_linear(request: Request):
+    """Handle Linear webhook events for issue status changes.
+
+    When an issue in SPO123 changes status:
+    - Interested → send interested/form-link email + notify Slack
+    - Declined → send decline email with discount code + notify Slack
+    - Approved → send form link email + notify Slack
+    """
+    body = await request.json()
+
+    action = body.get("action")
+    event_type = body.get("type")
+
+    # Only handle issue update events
+    if event_type != "Issue" or action != "update":
+        return {"ok": True, "skipped": True, "reason": "Not an issue update"}
+
+    issue_data = body.get("data", {})
+    updated_from = body.get("updatedFrom", {})
+
+    # Only process if the status (stateId) changed
+    if "stateId" not in updated_from:
+        return {"ok": True, "skipped": True, "reason": "No status change"}
+
+    issue_id = issue_data.get("id", "")
+    if not issue_id:
+        return {"ok": False, "error": "No issue ID"}
+
+    # Fetch full issue details from Linear
+    issue = await get_issue_details(issue_id)
+    if not issue.get("ok"):
+        logger.error("Failed to fetch issue details for %s: %s", issue_id, issue.get("error"))
+        return {"ok": False, "error": issue.get("error")}
+
+    new_status = issue.get("state_name", "")
+    identifier = issue.get("identifier", "")
+    title = issue.get("title", "")
+    description = issue.get("description", "")
+    issue_url = issue.get("url", "")
+    labels = issue.get("labels", [])
+
+    # Extract contact info from the issue description
+    recipient_email, recipient_name = _parse_email_from_description(description)
+    if not recipient_name:
+        recipient_name = _parse_name_from_title(title)
+
+    if not recipient_email:
+        logger.warning("No email found in issue %s description — skipping email", identifier)
+        # Still notify Slack about the status change
+        await post_message(
+            channel=SPORTS_INBOUND_CHANNEL,
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":arrows_counterclockwise: *{identifier}* moved to *{new_status}*\n"
+                            f"_{title}_\n"
+                            f":warning: No email address found — manual action needed.\n"
+                            f"<{issue_url}|View in Linear>",
+                },
+            }],
+            text=f"{identifier} moved to {new_status} (no email found)",
+        )
+        return {"ok": True, "status_changed": new_status, "email_sent": False, "reason": "No email in description"}
+
+    email_result = {"sent": False}
+    slack_text = ""
+
+    is_pitch = "Email Pitch" in labels or title.startswith("[Pitch]")
+
+    if new_status == "Interested":
+        if is_pitch:
+            # Pitch → Interested: send form link
+            prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
+            template = approved_email(recipient_name, _parse_subject_from_title(title), form_url=prefilled_url)
+        else:
+            # Submission → Interested: send handoff email CC Judith
+            template = interested_email(recipient_name)
+        email_result = send_email(
+            to=recipient_email,
+            subject=template["subject"],
+            body=template["body"],
+            cc=template.get("cc", ""),
+        )
+        slack_text = f":white_check_mark: *{identifier}* → *Interested*"
+
+    elif new_status == "Declined":
+        if is_pitch:
+            template = decline_pitch_email(recipient_name, _parse_subject_from_title(title))
+        else:
+            template = decline_submission_email(recipient_name)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
+
+    elif new_status == "Approved":
+        prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
+        subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
+        template = approved_email(recipient_name, subject, form_url=prefilled_url)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        slack_text = f":tada: *{identifier}* → *Approved*"
+
+    else:
+        # Other status changes (Hold, Triage, Done) — just notify Slack, no email
+        await post_message(
+            channel=SPORTS_INBOUND_CHANNEL,
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":arrows_counterclockwise: *{identifier}* moved to *{new_status}*\n"
+                            f"_{title}_\n"
+                            f"<{issue_url}|View in Linear>",
+                },
+            }],
+            text=f"{identifier} moved to {new_status}",
+        )
+        return {"ok": True, "status_changed": new_status, "email_sent": False}
+
+    # Post Slack notification for email-triggering status changes
+    email_status = recipient_email if email_result.get("sent") else f"{recipient_email} (queued — delegation pending)"
+    await post_message(
+        channel=SPORTS_INBOUND_CHANNEL,
+        blocks=[{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{slack_text}\n"
+                        f"_{title}_\n"
+                        f":envelope: Email sent to {email_status}\n"
+                        f"<{issue_url}|View in Linear>",
+            },
+        }],
+        text=f"{identifier} → {new_status}, email to {recipient_email}",
+    )
+
+    return {
+        "ok": True,
+        "status_changed": new_status,
+        "email_sent": email_result.get("sent", False),
+        "email_to": recipient_email,
+        "identifier": identifier,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Setup: Register Linear webhook (one-time call)
+# ---------------------------------------------------------------------------
+@app.post("/admin/setup-linear-webhook")
+async def setup_linear_webhook(request: Request):
+    """One-time setup: creates a Linear webhook pointing to this backend.
+
+    Call this once after deploying to register the webhook.
+    POST /admin/setup-linear-webhook with optional {"webhook_url": "..."}.
+    """
+    body = await request.json() if await request.body() else {}
+    webhook_url = body.get("webhook_url", "https://app-fsoqjwmi.fly.dev/webhook/linear")
+
+    result = await create_linear_webhook(webhook_url)
+    return result
 
 
 # ---------------------------------------------------------------------------

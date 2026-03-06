@@ -110,8 +110,7 @@ def build_submission_message(
                 {"type": "mrkdwn", "text": f"*Market:* {market}"},
                 {"type": "mrkdwn", "text": f"*Reach:* {reach}"},
                 {"type": "mrkdwn", "text": f"*Type:* {partnership_type}"},
-                {"type": "mrkdwn", "text": f"*Budget:* {budget}"},
-                {"type": "mrkdwn", "text": f"*Used Eight Sleep before?:* {used_before}"},
+                {"type": "mrkdwn", "text": f"*Slept on Pod before?:* {used_before}"},
             ],
         },
         {
@@ -170,6 +169,101 @@ def build_submission_message(
                     ),
                 }
             ],
+        },
+    ]
+
+
+def build_pitch_message_readonly(
+    sender_name: str,
+    sender_email: str,
+    subject: str,
+    date: str,
+    route: str,
+    preview: str,
+    linear_url: str = "",
+    linear_id: str = "",
+) -> list[dict]:
+    """Build read-only Block Kit message for new pitch notification (no buttons, with Linear link)."""
+    linear_text = f"<{linear_url}|View in Linear ({linear_id})>" if linear_url else "_Linear issue pending..._"
+    return [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "New sponsorship pitch", "emoji": True},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*From:* {sender_name} <{sender_email}>"},
+                {"type": "mrkdwn", "text": f"*Route:* {route}"},
+                {"type": "mrkdwn", "text": f"*Subject:* {subject}"},
+                {"type": "mrkdwn", "text": f"*Received:* {date}"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Preview:*\n{preview[:500]}"},
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":point_right: {linear_text}"},
+        },
+    ]
+
+
+def build_submission_message_readonly(
+    full_name: str,
+    email: str,
+    organization: str,
+    sport: str,
+    athlete_property: str,
+    market: str,
+    reach: str,
+    partnership_type: str,
+    socials: str,
+    used_before: str,
+    pitch: str,
+    sheet_row: str,
+    sheet_url: str,
+    linear_url: str = "",
+    linear_id: str = "",
+) -> list[dict]:
+    """Build read-only Block Kit message for form submission (no buttons, with Linear link)."""
+    linear_text = f"<{linear_url}|View in Linear ({linear_id})>" if linear_url else "_Linear issue pending..._"
+    return [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "New partnership form submission", "emoji": True},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Name:* {full_name}"},
+                {"type": "mrkdwn", "text": f"*Email:* {email}"},
+                {"type": "mrkdwn", "text": f"*Organization:* {organization}"},
+                {"type": "mrkdwn", "text": f"*Sport:* {sport}"},
+                {"type": "mrkdwn", "text": f"*Athlete / Property:* {athlete_property}"},
+                {"type": "mrkdwn", "text": f"*Market:* {market}"},
+                {"type": "mrkdwn", "text": f"*Reach:* {reach}"},
+                {"type": "mrkdwn", "text": f"*Type:* {partnership_type}"},
+                {"type": "mrkdwn", "text": f"*Slept on Pod before?:* {used_before}"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Socials:* {socials}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Their pitch:*\n{pitch}"},
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f":point_right: {linear_text}  |  <{sheet_url}|View in Google Sheet>",
+            },
         },
     ]
 
