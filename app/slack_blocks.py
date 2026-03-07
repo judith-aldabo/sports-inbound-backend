@@ -55,9 +55,9 @@ def build_pitch_message(
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "INTERESTED", "emoji": True},
+                    "text": {"type": "plain_text", "text": "SEND FORM", "emoji": True},
                     "style": "primary",
-                    "action_id": "pitch_interested",
+                    "action_id": "pitch_send_form",
                     "value": val,
                 },
                 {
@@ -68,14 +68,14 @@ def build_pitch_message(
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "DECLINE", "emoji": True},
+                    "text": {"type": "plain_text", "text": "DECLINE W CODE", "emoji": True},
                     "style": "danger",
-                    "action_id": "pitch_decline",
+                    "action_id": "pitch_decline_w_code",
                     "value": val,
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "NO DISCOUNT", "emoji": True},
+                    "text": {"type": "plain_text", "text": "DECLINE NO DISCOUNT", "emoji": True},
                     "action_id": "pitch_decline_no_discount",
                     "value": val,
                 },
@@ -183,9 +183,9 @@ def build_submission_message(
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "INTERESTED", "emoji": True},
+                    "text": {"type": "plain_text", "text": "LOOP IN JUDITH", "emoji": True},
                     "style": "primary",
-                    "action_id": "submission_interested",
+                    "action_id": "submission_loop_in_judith",
                     "value": val,
                 },
                 {
@@ -196,14 +196,14 @@ def build_submission_message(
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "DECLINE", "emoji": True},
+                    "text": {"type": "plain_text", "text": "DECLINE W CODE", "emoji": True},
                     "style": "danger",
-                    "action_id": "submission_decline",
+                    "action_id": "submission_decline_w_code",
                     "value": val,
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "NO DISCOUNT", "emoji": True},
+                    "text": {"type": "plain_text", "text": "DECLINE NO DISCOUNT", "emoji": True},
                     "action_id": "submission_decline_no_discount",
                     "value": val,
                 },
