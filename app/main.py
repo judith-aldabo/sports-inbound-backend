@@ -22,6 +22,7 @@ from app.config import (
     FORM_EDIT_ID,
     UNDO_WINDOW_SECONDS,
     RESPONSE_SHEET_ID,
+    WEBHOOK_SECRET,
 )
 from app.slack_blocks import build_pitch_message, build_submission_message, build_pitch_message_readonly, build_submission_message_readonly
 from app.slack_service import (
@@ -36,9 +37,11 @@ from app.linear_service import create_pitch_issue, create_submission_issue, get_
 from app.email_templates import (
     approved_email,
     decline_pitch_email,
+    decline_pitch_no_discount_email,
     submission_acknowledge_email,
     interested_email,
     decline_submission_email,
+    decline_submission_no_discount_email,
     schedule_call_email,
     request_media_kit_email,
     request_rate_card_email,
@@ -169,7 +172,7 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
         return
 
     # Dedup layer 2: cross-machine via Linear comments (survives restarts & multi-machine)
-    if new_status in {"Interested", "Declined", "Approved"}:
+    if new_status in {"Interested", "Declined", "Declined (No Discount)", "Approved"}:
         if await check_email_sent_marker(issue_id, new_status):
             logger.info("Skipping duplicate transition for %s -> %s (marker found in Linear)", issue_id, new_status)
             _processed_transitions.add(dedup_key)
@@ -236,6 +239,14 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
         email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
         slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
 
+    elif new_status == "Declined (No Discount)":
+        if is_pitch:
+            template = decline_pitch_no_discount_email(recipient_name, _parse_subject_from_title(title))
+        else:
+            template = decline_submission_no_discount_email(recipient_name)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        slack_text = f":no_entry_sign: *{identifier}* → *Declined (No Discount)*"
+
     elif new_status == "Approved":
         prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
         subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
@@ -265,7 +276,15 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
         await add_email_sent_marker(issue_id, new_status)
 
     # Post Slack notification for email-triggering status changes
-    email_status = recipient_email if email_result.get("sent") else f"{recipient_email} (failed)"
+    if email_result.get("sent"):
+        email_status = recipient_email
+        email_icon = ":envelope:"
+    else:
+        email_status = f"{recipient_email} (:x: FAILED)"
+        email_icon = ":rotating_light:"
+        # Alert on failure so Judith knows to act manually
+        slack_text = f":rotating_light: *{identifier}* → *{new_status}* — EMAIL FAILED"
+
     await post_message(
         channel=SPORTS_INBOUND_CHANNEL,
         blocks=[{
@@ -274,7 +293,7 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
                 "type": "mrkdwn",
                 "text": f"{slack_text}\n"
                         f"_{title}_\n"
-                        f":envelope: Email sent to {email_status}\n"
+                        f"{email_icon} Email to {email_status}\n"
                         f"<{issue_url}|View in Linear>",
             },
         }],
@@ -391,11 +410,27 @@ def _build_prefilled_form_url(name: str, email: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Webhook authentication helper
+# ---------------------------------------------------------------------------
+def _verify_webhook_secret(request: Request) -> bool:
+    """Verify the webhook request has a valid secret. Returns True if valid or no secret configured."""
+    if not WEBHOOK_SECRET:
+        return True  # No secret configured — allow all (dev mode)
+    # Accept secret via header or query param
+    header_secret = request.headers.get("X-Webhook-Secret", "")
+    query_secret = request.query_params.get("secret", "")
+    return hmac.compare_digest(WEBHOOK_SECRET, header_secret) or hmac.compare_digest(WEBHOOK_SECRET, query_secret)
+
+
+# ---------------------------------------------------------------------------
 # Webhook: New email from Zapier (Zap 1 trigger -> webhook action)
 # ---------------------------------------------------------------------------
 @app.post("/webhook/new-email")
 async def webhook_new_email(request: Request):
     """Receive email data from Zapier Zap 1 and post to #sports-inbound with buttons."""
+    if not _verify_webhook_secret(request):
+        return Response(status_code=403, content="Invalid webhook secret")
+
     body = await request.json()
 
     sender_name = body.get("sender_name", "Unknown")
@@ -449,6 +484,9 @@ async def webhook_new_email(request: Request):
 @app.post("/webhook/new-submission")
 async def webhook_new_submission(request: Request):
     """Receive form data from Zapier Zap 3a and post to #sports-inbound with buttons + send ack email."""
+    if not _verify_webhook_secret(request):
+        return Response(status_code=403, content="Invalid webhook secret")
+
     body = await request.json()
 
     full_name = body.get("full_name", "")
@@ -1009,6 +1047,14 @@ async def webhook_linear(request: Request):
             template = decline_submission_email(recipient_name)
         email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
         slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
+
+    elif new_status == "Declined (No Discount)":
+        if is_pitch:
+            template = decline_pitch_no_discount_email(recipient_name, _parse_subject_from_title(title))
+        else:
+            template = decline_submission_no_discount_email(recipient_name)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        slack_text = f":no_entry_sign: *{identifier}* → *Declined (No Discount)*"
 
     elif new_status == "Approved":
         prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)

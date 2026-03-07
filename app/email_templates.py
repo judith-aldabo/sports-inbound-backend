@@ -1,5 +1,5 @@
 """Email templates for all outbound emails from sports@eightsleep.com."""
-from app.config import FORM_URL, SENDER_EMAIL, JUDITH_EMAIL, CHECKOUT_URL_CORE, CHECKOUT_URL_ULTRA
+from app.config import FORM_URL, SENDER_EMAIL, JUDITH_EMAIL, CHECKOUT_URL
 
 SIGNATURE = f"""Best,
 Eight Sleep Sports Team
@@ -7,17 +7,17 @@ Eight Sleep Sports Team
 
 
 def approved_email(recipient_name: str, original_subject: str, form_url: str = "") -> dict:
-    """Form link email sent after APPROVED. Uses pre-filled URL if provided."""
+    """Form link email sent after APPROVED/INTERESTED on pitch. Uses pre-filled URL if provided."""
     link = form_url or FORM_URL
     return {
         "subject": f"Re: {original_subject}",
         "body": f"""Hi {recipient_name},
 
-Thank you for reaching out about a potential partnership with Eight Sleep.
+Thank you for reaching out. We've reviewed your pitch and would like to learn more.
 
-We review all proposals on a rolling basis. To ensure we can properly assess your submission, please take 3 minutes to complete our partnership form: {link}
+To help us properly assess the opportunity, please take 3 minutes to complete our partnership form: {link}
 
-We'll be in touch if there's alignment.
+We'll be in touch once we've reviewed your submission.
 
 {SIGNATURE}""",
     }
@@ -32,20 +32,17 @@ def decline_pitch_email(recipient_name: str, original_subject: str) -> dict:
         "subject": "Your Partnership Inquiry \u2014 Eight Sleep Sports",
         "body": f"""Hi {recipient_name},
 
-Thank you for reaching out. Every athlete who contacts us does so because they take performance seriously \u2014 and that matters to us.
+Thank you for reaching out about a partnership with Eight Sleep.
 
 While we\u2019re not moving forward with a partnership at this time, we want you to have the same competitive advantage our athletes already use every night.
 
 Sleep is where performance is built. Deep, quality sleep is the one recovery tool that changes everything \u2014 reaction time, endurance, mental sharpness, injury resilience.
 
-As a mark of respect for what you\u2019re building:
+As a thank you for reaching out, here’s an exclusive offer: visit www.eightsleep.com and use code DEEPSLEEPATHLETE at checkout.
 
-$200 off Pod 5 Core \u2192 {CHECKOUT_URL_CORE}
-$350 off Pod 5 Ultra \u2192 {CHECKOUT_URL_ULTRA}
+This is the same technology trusted by athletes competing at the highest level in Formula 1, cycling, and beyond.
 
-This is the same technology trusted by athletes competing at the highest level in Formula 1, cycling, and beyond. It\u2019s yours.
-
-We\u2019ll keep you on file. The sports world is small, and we mean that in the best way.
+If things change down the road, don\u2019t hesitate to reach out again \u2014 we\u2019d be happy to revisit.
 
 {SIGNATURE}""",
     }
@@ -93,14 +90,47 @@ We\u2019re not in a position to move forward commercially right now \u2014 but w
 
 What we do know is that serious athletes deserve serious recovery. Deep sleep isn\u2019t passive \u2014 it\u2019s where strength is rebuilt, decisions sharpen, and the body does the work no training session can replicate.
 
-We want you to have that edge:
-
-$200 off Pod 5 Core \u2192 {CHECKOUT_URL_CORE}
-$350 off Pod 5 Ultra \u2192 {CHECKOUT_URL_ULTRA}
+We want you to have that edge — visit www.eightsleep.com and use code DEEPSLEEPATHLETE at checkout.
 
 This is the technology our partners use every night before they compete. Now it\u2019s available to you.
 
-We\u2019ll be watching what you do next.
+If things change down the road, don\u2019t hesitate to reach out again.
+
+{SIGNATURE}""",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Decline (No Discount) templates — for spam/irrelevant pitches
+# ---------------------------------------------------------------------------
+
+def decline_pitch_no_discount_email(recipient_name: str, original_subject: str) -> dict:
+    """Clean decline email with no discount code — for spam or irrelevant pitches."""
+    return {
+        "subject": "Your Partnership Inquiry \u2014 Eight Sleep Sports",
+        "body": f"""Hi {recipient_name},
+
+Thank you for reaching out about a partnership with Eight Sleep.
+
+After reviewing your proposal, we\u2019ve decided not to move forward at this time.
+
+We appreciate your interest and wish you all the best.
+
+{SIGNATURE}""",
+    }
+
+
+def decline_submission_no_discount_email(recipient_name: str) -> dict:
+    """Clean decline email for form submissions with no discount code."""
+    return {
+        "subject": "Your Partnership Proposal \u2014 Eight Sleep Sports",
+        "body": f"""Hi {recipient_name},
+
+Thank you for submitting your partnership proposal to Eight Sleep.
+
+After reviewing your submission, we\u2019ve decided not to move forward at this time.
+
+We appreciate your interest and wish you all the best.
 
 {SIGNATURE}""",
     }

@@ -39,7 +39,9 @@ JUDITH_SLACK_ID = "U096422D10X"
 SENDER_NAME = "Eight Sleep Sports Team"
 SENDER_EMAIL = "sports@eightsleep.com"
 
+# Webhook authentication (shared secret for Zapier → backend)
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
 # Discount code for decline emails
 DISCOUNT_CODE = "DEEPSLEEPATHLETE"
-CHECKOUT_URL_CORE = f"https://www.eightsleep.com/product/pod-cover/?code={DISCOUNT_CODE}"
-CHECKOUT_URL_ULTRA = f"https://www.eightsleep.com/product/pod-cover/?code={DISCOUNT_CODE}"
+CHECKOUT_URL = "https://www.eightsleep.com"
