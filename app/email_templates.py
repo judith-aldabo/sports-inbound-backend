@@ -9,9 +9,7 @@ Eight Sleep Sports Team
 def approved_email(recipient_name: str, original_subject: str, form_url: str = "") -> dict:
     """Form link email sent after APPROVED/INTERESTED on pitch. Uses pre-filled URL if provided."""
     link = form_url or FORM_URL
-    return {
-        "subject": f"Re: {original_subject}",
-        "body": f"""Hi {recipient_name},
+    plain_body = f"""Hi {recipient_name},
 
 Thank you for reaching out. We've reviewed your pitch and would like to learn more.
 
@@ -19,7 +17,16 @@ To help us properly assess the opportunity, please take 3 minutes to complete ou
 
 We'll be in touch once we've reviewed your submission.
 
-{SIGNATURE}""",
+{SIGNATURE}"""
+    html_body = f"""<p>Hi {recipient_name},</p>
+<p>Thank you for reaching out. We've reviewed your pitch and would like to learn more.</p>
+<p>To help us properly assess the opportunity, please take 3 minutes to complete our <a href="{link}">partnership form</a>.</p>
+<p>We'll be in touch once we've reviewed your submission.</p>
+<p>{SIGNATURE.replace(chr(10), '<br>')}</p>"""
+    return {
+        "subject": f"Re: {original_subject}",
+        "body": plain_body,
+        "html_body": html_body,
     }
 
 

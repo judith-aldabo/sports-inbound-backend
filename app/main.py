@@ -80,7 +80,31 @@ app.add_middleware(
 async def start_linear_poller():
     """Start the background Linear poller on app startup."""
     asyncio.create_task(_linear_poll_loop())
+    asyncio.create_task(_keep_alive_loop())
     logger.info("Linear poller background task started (every %ds)", POLL_INTERVAL_SECONDS)
+
+
+KEEP_ALIVE_INTERVAL = 120  # Ping self every 2 minutes to prevent Fly.io auto-suspend
+
+
+async def _keep_alive_loop():
+    """Self-ping to prevent Fly.io from auto-suspending the machine.
+
+    Fly.io suspends idle machines, but Slack button clicks have a 3-second
+    timeout. If the machine is suspended, it takes too long to wake up and
+    Slack shows an error. This loop keeps the machine alive.
+    """
+    import httpx
+    await asyncio.sleep(10)  # Wait for app to start
+    logger.info("Keep-alive loop started (every %ds)", KEEP_ALIVE_INTERVAL)
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get("http://localhost:8000/healthz", timeout=5)
+                logger.debug("Keep-alive ping: %s", resp.status_code)
+        except Exception as e:
+            logger.debug("Keep-alive ping failed (expected during shutdown): %s", e)
+        await asyncio.sleep(KEEP_ALIVE_INTERVAL)
 
 
 async def _linear_poll_loop():
@@ -223,11 +247,13 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             template = approved_email(recipient_name, _parse_subject_from_title(title), form_url=prefilled_url)
         else:
             template = interested_email(recipient_name)
+        await add_email_sent_marker(issue_id, new_status)  # Write marker BEFORE sending
         email_result = send_email(
             to=recipient_email,
             subject=template["subject"],
             body=template["body"],
             cc=template.get("cc", ""),
+            html_body=template.get("html_body", ""),
         )
         slack_text = f":white_check_mark: *{identifier}* → *Interested*"
 
@@ -236,7 +262,8 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             template = decline_pitch_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
 
     elif new_status == "Declined (No Discount)":
@@ -244,14 +271,16 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             template = decline_pitch_no_discount_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_no_discount_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined (No Discount)*"
 
     elif new_status == "Approved":
         prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
         subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
         template = approved_email(recipient_name, subject, form_url=prefilled_url)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":tada: *{identifier}* → *Approved*"
 
     else:
@@ -270,10 +299,6 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             text=f"{identifier} moved to {new_status}",
         )
         return
-
-    # Mark as sent in Linear for cross-machine dedup
-    if email_result.get("sent"):
-        await add_email_sent_marker(issue_id, new_status)
 
     # Post Slack notification for email-triggering status changes
     if email_result.get("sent"):
@@ -400,13 +425,11 @@ async def api_form_submission(request: Request):
 # Helper: Build pre-filled form URL (V2 Feature 5)
 # ---------------------------------------------------------------------------
 def _build_prefilled_form_url(name: str, email: str) -> str:
-    """Build a Google Forms URL with name and email pre-filled."""
-    # Google Forms prefill uses entry IDs from the form
-    # For now, use the viewform URL with prefill params
-    base = f"https://docs.google.com/forms/d/e/{FORM_EDIT_ID}/viewform"
+    """Build a branded form URL with name and email pre-filled."""
+    base = FORM_URL  # https://form-creator-app-u47y322j.devinapps.com
     params = urlencode({
-        "entry.1": name,      # Full Name field
-        "entry.2": email,     # Email field
+        "name": name,
+        "email": email,
     })
     return f"{base}?{params}"
 
@@ -994,21 +1017,41 @@ def _parse_email_from_description(description: str) -> tuple[str, str]:
     # For form submissions: look for Name field in table
     name_match = re.search(r"\*\*Name\*\*\s*\|\s*(.+?)(?:\s*\||\n)", description)
     if name_match:
-        return email, name_match.group(1).strip()
+        return email, _clean_name(name_match.group(1).strip())
 
     # For pitches: look for From field
     from_match = re.search(r"\*\*From:\*\*\s*(.+?)\s*<", description)
     if from_match:
-        return email, from_match.group(1).strip()
+        return email, _clean_name(from_match.group(1).strip())
 
     # Fallback: try title parsing
     return email, ""
 
 
+def _clean_name(name: str) -> str:
+    """Strip markdown link artifacts and email fragments from a parsed name.
+
+    Linear auto-formats emails as [email](mailto:email), which can leak into
+    name fields when parsed from descriptions. Also strips stray brackets,
+    parentheses, and angle brackets.
+    """
+    # Remove markdown link patterns like [text](url)
+    name = re.sub(r'\[([^\]]*)]\([^)]*\)', r'\1', name)
+    # Remove any leftover <email> or (email) fragments
+    name = re.sub(r'<[^>]*>', '', name)
+    name = re.sub(r'\([^)]*@[^)]*\)', '', name)
+    # Remove stray brackets and parens
+    name = re.sub(r'[\[\]()]', '', name)
+    # Remove email addresses that leaked in
+    name = re.sub(r'\S+@\S+', '', name)
+    # Collapse whitespace
+    return re.sub(r'\s+', ' ', name).strip()
+
+
 def _parse_name_from_title(title: str) -> str:
     """Extract name from Linear issue title like '[Form] Name — Org (Sport)' or '[Pitch] Name — Subject'."""
     match = re.match(r"\[(?:Form|Pitch)\]\s*(.+?)\s*[—\-]", title)
-    return match.group(1).strip() if match else ""
+    return _clean_name(match.group(1).strip()) if match else ""
 
 
 def _parse_subject_from_title(title: str) -> str:
@@ -1088,6 +1131,12 @@ async def webhook_linear(request: Request):
 
     is_pitch = "Email Pitch" in labels or title.startswith("[Pitch]")
 
+    # Dedup: skip if a button click (or poller) already sent the email for this status
+    if new_status in {"Interested", "Declined", "Declined (No Discount)", "Approved"}:
+        if await check_email_sent_marker(issue_id, new_status):
+            logger.info("Webhook: skipping %s → %s (dedup marker found)", identifier, new_status)
+            return {"ok": True, "status_changed": new_status, "email_sent": False, "reason": "Dedup: already sent"}
+
     if new_status == "Interested":
         if is_pitch:
             # Pitch → Interested: send form link
@@ -1096,11 +1145,13 @@ async def webhook_linear(request: Request):
         else:
             # Submission → Interested: send handoff email CC Judith
             template = interested_email(recipient_name)
+        await add_email_sent_marker(issue_id, new_status)  # Write marker BEFORE sending
         email_result = send_email(
             to=recipient_email,
             subject=template["subject"],
             body=template["body"],
             cc=template.get("cc", ""),
+            html_body=template.get("html_body", ""),
         )
         slack_text = f":white_check_mark: *{identifier}* → *Interested*"
 
@@ -1109,7 +1160,8 @@ async def webhook_linear(request: Request):
             template = decline_pitch_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
 
     elif new_status == "Declined (No Discount)":
@@ -1117,14 +1169,16 @@ async def webhook_linear(request: Request):
             template = decline_pitch_no_discount_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_no_discount_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined (No Discount)*"
 
     elif new_status == "Approved":
         prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
         subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
         template = approved_email(recipient_name, subject, form_url=prefilled_url)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":tada: *{identifier}* → *Approved*"
 
     else:
@@ -1307,9 +1361,16 @@ async def _handle_pitch_interested(
     email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
     """INTERESTED (pitch): Send form link email + update Linear + confirm."""
+    # Write dedup marker BEFORE sending so the poller won't duplicate
+    if linear_issue_id:
+        await add_email_sent_marker(linear_issue_id, "Interested")
+
     prefilled_url = _build_prefilled_form_url(name, email)
     template = approved_email(name, subject, form_url=prefilled_url)
-    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+    email_result = send_email(
+        to=email, subject=template["subject"], body=template["body"],
+        html_body=template.get("html_body", ""),
+    )
 
     # Update Linear status
     if linear_issue_id:
@@ -1332,6 +1393,9 @@ async def _handle_pitch_decline(
     email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
     """DECLINE (pitch): Send decline email with discount + update Linear + confirm."""
+    if linear_issue_id:
+        await add_email_sent_marker(linear_issue_id, "Declined")
+
     template = decline_pitch_email(name, subject)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
 
@@ -1353,6 +1417,9 @@ async def _handle_pitch_decline_no_discount(
     email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
     """NO DISCOUNT (pitch): Send clean decline email + update Linear + confirm."""
+    if linear_issue_id:
+        await add_email_sent_marker(linear_issue_id, "Declined (No Discount)")
+
     template = decline_pitch_no_discount_email(name, subject)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
 
@@ -1415,6 +1482,9 @@ async def _handle_submission_interested(
     email: str, name: str, row: str, linear_issue_id: str = "",
 ):
     """INTERESTED (submission): Send handoff email CC Judith + update Linear + sheet + quick-reply buttons."""
+    if linear_issue_id:
+        await add_email_sent_marker(linear_issue_id, "Interested")
+
     template = interested_email(name)
     email_result = send_email(
         to=email, subject=template["subject"], body=template["body"], cc=template["cc"],
@@ -1442,6 +1512,9 @@ async def _handle_submission_decline(
     email: str, name: str, row: str, linear_issue_id: str = "",
 ):
     """DECLINE (submission): Send decline email with discount + update Linear + sheet + confirm."""
+    if linear_issue_id:
+        await add_email_sent_marker(linear_issue_id, "Declined")
+
     template = decline_submission_email(name)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
 
@@ -1465,6 +1538,9 @@ async def _handle_submission_decline_no_discount(
     email: str, name: str, row: str, linear_issue_id: str = "",
 ):
     """NO DISCOUNT (submission): Send clean decline email + update Linear + sheet + confirm."""
+    if linear_issue_id:
+        await add_email_sent_marker(linear_issue_id, "Declined (No Discount)")
+
     template = decline_submission_no_discount_email(name)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
 
