@@ -1,7 +1,7 @@
 """Linear API service for creating and managing Sports Inbound issues."""
 import httpx
 import logging
-from app.config import LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_LABEL_EMAIL_PITCH, LINEAR_LABEL_FORM_SUBMISSION
+from app.config import LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_LABEL_EMAIL_PITCH, LINEAR_LABEL_FORM_SUBMISSION, LINEAR_STATUS_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +248,51 @@ async def add_email_sent_marker(issue_id: str, status: str) -> None:
             )
     except Exception as e:
         logger.error("Error adding email sent marker for %s: %s", issue_id, e)
+
+
+async def update_issue_status(issue_id: str, status_name: str) -> dict:
+    """Update a Linear issue's workflow state by status name.
+
+    Used by Slack triage buttons to keep Linear in sync when Judith
+    triages directly from Slack instead of the Linear UI.
+    """
+    state_id = LINEAR_STATUS_IDS.get(status_name)
+    if not state_id:
+        logger.error("Unknown status name: %s", status_name)
+        return {"ok": False, "error": f"Unknown status: {status_name}"}
+
+    mutation = """
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+            success
+            issue { id identifier state { name } }
+        }
+    }
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                GRAPHQL_URL,
+                headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
+                json={"query": mutation, "variables": {"id": issue_id, "input": {"stateId": state_id}}},
+                timeout=10.0,
+            )
+            data = resp.json()
+
+        if "errors" in data:
+            logger.error("Linear update_issue_status failed: %s", data["errors"])
+            return {"ok": False, "error": str(data["errors"])}
+
+        result = data.get("data", {}).get("issueUpdate", {})
+        if result.get("success"):
+            issue = result.get("issue", {})
+            logger.info("Linear issue %s moved to %s", issue.get("identifier"), status_name)
+            return {"ok": True, "identifier": issue.get("identifier"), "status": status_name}
+
+        return {"ok": False, "error": "Update returned success=false"}
+    except Exception as e:
+        logger.error("Error updating issue status: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
 async def create_linear_webhook(webhook_url: str) -> dict:

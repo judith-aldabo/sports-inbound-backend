@@ -33,7 +33,7 @@ from app.slack_service import (
 )
 from app.sheets_service import update_row_status, get_weekly_stats, append_form_submission
 from app.gmail_service import send_email
-from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook, get_all_team_issues, check_email_sent_marker, add_email_sent_marker
+from app.linear_service import create_pitch_issue, create_submission_issue, get_issue_details, create_linear_webhook, get_all_team_issues, check_email_sent_marker, add_email_sent_marker, update_issue_status
 from app.email_templates import (
     approved_email,
     decline_pitch_email,
@@ -354,8 +354,9 @@ async def api_form_submission(request: Request):
     linear_url = linear_result.get("url", "")
     linear_id = linear_result.get("identifier", "")
 
-    # 3. Post read-only notification to #sports-inbound (with Linear link)
-    blocks = build_submission_message_readonly(
+    # 3. Post triage notification to #sports-inbound WITH buttons
+    linear_issue_id = linear_result.get("id", "")
+    blocks = build_submission_message(
         full_name=full_name,
         email=email_addr,
         organization=organization,
@@ -371,6 +372,7 @@ async def api_form_submission(request: Request):
         sheet_url=sheet_url,
         linear_url=linear_url,
         linear_id=linear_id,
+        linear_issue_id=linear_issue_id,
     )
 
     slack_result = await post_message(
@@ -451,8 +453,9 @@ async def webhook_new_email(request: Request):
     linear_url = linear_result.get("url", "")
     linear_id = linear_result.get("identifier", "")
 
-    # 2. Post read-only notification to #sports-inbound (with Linear link)
-    blocks = build_pitch_message_readonly(
+    # 2. Post triage notification to #sports-inbound WITH buttons
+    linear_issue_id = linear_result.get("id", "")
+    blocks = build_pitch_message(
         sender_name=sender_name,
         sender_email=sender_email,
         subject=subject,
@@ -461,6 +464,7 @@ async def webhook_new_email(request: Request):
         preview=preview,
         linear_url=linear_url,
         linear_id=linear_id,
+        linear_issue_id=linear_issue_id,
     )
 
     result = await post_message(
@@ -526,8 +530,9 @@ async def webhook_new_submission(request: Request):
     linear_url = linear_result.get("url", "")
     linear_id = linear_result.get("identifier", "")
 
-    # 2. Post read-only notification to #sports-inbound (with Linear link)
-    blocks = build_submission_message_readonly(
+    # 2. Post triage notification to #sports-inbound WITH buttons
+    linear_issue_id = linear_result.get("id", "")
+    blocks = build_submission_message(
         full_name=full_name,
         email=email_addr,
         organization=organization,
@@ -543,6 +548,7 @@ async def webhook_new_submission(request: Request):
         sheet_url=sheet_url,
         linear_url=linear_url,
         linear_id=linear_id,
+        linear_issue_id=linear_issue_id,
     )
 
     slack_result = await post_message(
@@ -577,24 +583,30 @@ async def slack_interactions(request: Request):
     """
     raw_body = await request.body()
 
-    # Verify Slack signature if signing secret is configured
-    if SLACK_SIGNING_SECRET:
-        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-        slack_sig = request.headers.get("X-Slack-Signature", "")
+    # SECURITY: Verify Slack signing secret on every request.
+    # This is MANDATORY — button clicks trigger emails from sports@eightsleep.com.
+    # An unvalidated endpoint would allow anyone to fire emails.
+    if not SLACK_SIGNING_SECRET:
+        logger.error("SLACK_SIGNING_SECRET is not configured — rejecting all interactions")
+        return Response(status_code=500, content="Server misconfigured: signing secret missing")
 
-        # Reject requests older than 5 minutes
-        if abs(time.time() - float(timestamp or 0)) > 300:
-            return Response(status_code=403, content="Request too old")
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    slack_sig = request.headers.get("X-Slack-Signature", "")
 
-        sig_basestring = f"v0:{timestamp}:{raw_body.decode('utf-8')}"
-        my_sig = "v0=" + hmac.new(
-            SLACK_SIGNING_SECRET.encode("utf-8"),
-            sig_basestring.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+    # Reject requests older than 5 minutes
+    if abs(time.time() - float(timestamp or 0)) > 300:
+        return Response(status_code=403, content="Request too old")
 
-        if not hmac.compare_digest(my_sig, slack_sig):
-            return Response(status_code=403, content="Invalid signature")
+    sig_basestring = f"v0:{timestamp}:{raw_body.decode('utf-8')}"
+    my_sig = "v0=" + hmac.new(
+        SLACK_SIGNING_SECRET.encode("utf-8"),
+        sig_basestring.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(my_sig, slack_sig):
+        logger.warning("Invalid Slack signature — possible spoofing attempt")
+        return Response(status_code=403, content="Invalid signature")
 
     # Parse the payload
     form_data = parse_qs(raw_body.decode("utf-8"))
@@ -616,42 +628,85 @@ async def slack_interactions(request: Request):
 
     logger.info("Slack interaction: action=%s, value=%s, channel=%s, ts=%s", action_id, value, channel_id, message_ts)
 
-    # Parse value (format: "email|||name|||subject_or_row")
+    # Parse value (format: "email|||name|||subject_or_row|||linear_issue_id")
     parts = value.split("|||")
     recipient_email = parts[0] if len(parts) > 0 else ""
     recipient_name = parts[1] if len(parts) > 1 else ""
     third_field = parts[2] if len(parts) > 2 else ""
+    linear_issue_id = parts[3] if len(parts) > 3 else ""
 
     # Dispatch based on action_id
-    # --- V1: Primary actions (now with undo) ---
-    if action_id == "pitch_approved":
+    # --- Primary triage actions (all with undo grace period) ---
+    # INVARIANT: No email is sent without explicit human button click (Judith Aldabo).
+    if action_id == "pitch_interested":
         await _start_pending_action(
-            "pitch_approved", channel_id, message_ts, original_blocks,
-            recipient_email, recipient_name, third_field,
+            "pitch_interested", channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+        )
+
+    elif action_id == "pitch_approved":
+        # Legacy alias for pitch_interested
+        await _start_pending_action(
+            "pitch_interested", channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
         )
 
     elif action_id == "pitch_decline":
         await _start_pending_action(
             "pitch_decline", channel_id, message_ts, original_blocks,
-            recipient_email, recipient_name, third_field,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+        )
+
+    elif action_id == "pitch_decline_no_discount":
+        await _start_pending_action(
+            "pitch_decline_no_discount", channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+        )
+
+    elif action_id == "pitch_hold":
+        await _handle_hold(
+            channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+            is_pitch=True,
+        )
+
+    elif action_id == "pitch_duplicate":
+        await _handle_duplicate(
+            channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+            is_pitch=True,
         )
 
     elif action_id == "submission_interested":
         await _start_pending_action(
             "submission_interested", channel_id, message_ts, original_blocks,
-            recipient_email, recipient_name, third_field,
+            recipient_email, recipient_name, third_field, linear_issue_id,
         )
 
     elif action_id == "submission_hold":
-        await _handle_submission_hold(
+        await _handle_hold(
             channel_id, message_ts, original_blocks,
-            recipient_email, recipient_name, third_field,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+            is_pitch=False,
         )
 
     elif action_id == "submission_decline":
         await _start_pending_action(
             "submission_decline", channel_id, message_ts, original_blocks,
-            recipient_email, recipient_name, third_field,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+        )
+
+    elif action_id == "submission_decline_no_discount":
+        await _start_pending_action(
+            "submission_decline_no_discount", channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+        )
+
+    elif action_id == "submission_duplicate":
+        await _handle_duplicate(
+            channel_id, message_ts, original_blocks,
+            recipient_email, recipient_name, third_field, linear_issue_id,
+            is_pitch=False,
         )
 
     # --- V2: Undo ---
@@ -683,16 +738,19 @@ async def slack_interactions(request: Request):
 async def _start_pending_action(
     action_type: str,
     channel: str, ts: str, blocks: list[dict],
-    email: str, name: str, third_field: str,
+    email: str, name: str, third_field: str, linear_issue_id: str = "",
 ):
     """Replace buttons with a countdown + UNDO button. Execute after UNDO_WINDOW_SECONDS."""
     pending_id = str(uuid.uuid4())[:8]
 
     action_labels = {
-        "pitch_approved": "APPROVED",
+        "pitch_interested": "INTERESTED",
+        "pitch_approved": "INTERESTED",
         "pitch_decline": "DECLINE",
+        "pitch_decline_no_discount": "NO DISCOUNT",
         "submission_interested": "INTERESTED",
         "submission_decline": "DECLINE",
+        "submission_decline_no_discount": "NO DISCOUNT",
     }
     label = action_labels.get(action_type, action_type.upper())
 
@@ -709,6 +767,7 @@ async def _start_pending_action(
         "email": email,
         "name": name,
         "third_field": third_field,
+        "linear_issue_id": linear_issue_id,
         "label": label,
     }
 
@@ -731,15 +790,20 @@ async def _execute_after_delay(pending_id: str):
     email = pending["email"]
     name = pending["name"]
     third_field = pending["third_field"]
+    linear_id = pending.get("linear_issue_id", "")
 
-    if action_type == "pitch_approved":
-        await _handle_pitch_approved(channel, ts, blocks, email, name, third_field)
+    if action_type == "pitch_interested":
+        await _handle_pitch_interested(channel, ts, blocks, email, name, third_field, linear_id)
     elif action_type == "pitch_decline":
-        await _handle_pitch_decline(channel, ts, blocks, email, name, third_field)
+        await _handle_pitch_decline(channel, ts, blocks, email, name, third_field, linear_id)
+    elif action_type == "pitch_decline_no_discount":
+        await _handle_pitch_decline_no_discount(channel, ts, blocks, email, name, third_field, linear_id)
     elif action_type == "submission_interested":
-        await _handle_submission_interested(channel, ts, blocks, email, name, third_field)
+        await _handle_submission_interested(channel, ts, blocks, email, name, third_field, linear_id)
     elif action_type == "submission_decline":
-        await _handle_submission_decline(channel, ts, blocks, email, name, third_field)
+        await _handle_submission_decline(channel, ts, blocks, email, name, third_field, linear_id)
+    elif action_type == "submission_decline_no_discount":
+        await _handle_submission_decline_no_discount(channel, ts, blocks, email, name, third_field, linear_id)
 
 
 async def _handle_undo(pending_id: str, channel: str, ts: str, blocks: list[dict]):
@@ -1233,101 +1297,187 @@ def _disable_buttons(blocks: list[dict], chosen_label: str) -> list[dict]:
     return new_blocks
 
 
-async def _handle_pitch_approved(
+# ---------------------------------------------------------------------------
+# Action handlers — all update Linear, send email (if applicable), confirm in Slack
+# INVARIANT: No email fires without explicit human button click.
+# ---------------------------------------------------------------------------
+
+async def _handle_pitch_interested(
     channel: str, ts: str, blocks: list[dict],
-    email: str, name: str, subject: str,
+    email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
-    """APPROVED: Send form link email (with pre-filled URL) + post confirmation."""
-    # V2 Feature 5: Pre-fill form URL with sender's name and email
+    """INTERESTED (pitch): Send form link email + update Linear + confirm."""
     prefilled_url = _build_prefilled_form_url(name, email)
     template = approved_email(name, subject, form_url=prefilled_url)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
 
-    updated = _disable_buttons(blocks, "APPROVED")
+    # Update Linear status
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Interested")
+
+    # Replace buttons with quick-reply options
+    updated = _replace_with_quick_reply_buttons(blocks, email, name, subject)
     await update_message(channel, ts, updated)
 
-    email_status = email if email_result.get("sent") else f"{email} (queued - Gmail not connected)"
+    email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done - form link sent to {email_status}",
+        f":white_check_mark: Done — form link sent to {email_status}\n"
+        f"_Optional: click a follow-up button above to send an additional email._",
     )
 
 
 async def _handle_pitch_decline(
     channel: str, ts: str, blocks: list[dict],
-    email: str, name: str, subject: str,
+    email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
-    """DECLINE: Send decline email + post confirmation."""
+    """DECLINE (pitch): Send decline email with discount + update Linear + confirm."""
     template = decline_pitch_email(name, subject)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Declined")
 
     updated = _disable_buttons(blocks, "DECLINE")
     await update_message(channel, ts, updated)
 
-    email_status = email if email_result.get("sent") else f"{email} (queued - Gmail not connected)"
+    email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done - decline email sent to {email_status}",
+        f":white_check_mark: Done — decline email (with discount) sent to {email_status}",
     )
 
 
-async def _handle_submission_interested(
+async def _handle_pitch_decline_no_discount(
     channel: str, ts: str, blocks: list[dict],
-    email: str, name: str, row: str,
+    email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
-    """INTERESTED: Send handoff email + update sheet + show quick-reply buttons."""
-    template = interested_email(name)
-    email_result = send_email(
-        to=email, subject=template["subject"], body=template["body"], cc=template["cc"],
-    )
+    """NO DISCOUNT (pitch): Send clean decline email + update Linear + confirm."""
+    template = decline_pitch_no_discount_email(name, subject)
+    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
 
-    update_row_status(row, status="Interested", next_action="Judith to follow up")
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Declined (No Discount)")
 
-    # V2 Feature 3: Replace original buttons with quick-reply template buttons
-    updated = _replace_with_quick_reply_buttons(blocks, email, name, row)
+    updated = _disable_buttons(blocks, "NO DISCOUNT")
     await update_message(channel, ts, updated)
 
-    email_status = email if email_result.get("sent") else f"{email} (queued - Gmail not connected)"
+    email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done - handoff email sent to {email_status}, {JUDITH_EMAIL} CCd\n"
-        f"_Optional: click a follow-up button above to send an additional email._",
+        f":white_check_mark: Done — decline email (no discount) sent to {email_status}",
     )
 
 
-async def _handle_submission_hold(
+async def _handle_hold(
     channel: str, ts: str, blocks: list[dict],
-    email: str, name: str, row: str,
+    email: str, name: str, third_field: str, linear_issue_id: str = "",
+    is_pitch: bool = False,
 ):
-    """HOLD: Update sheet + show reminder interval buttons."""
-    update_row_status(row, status="Hold", next_action="Revisit next quarter")
+    """HOLD: No email sent. Update Linear + sheet + show reminder buttons."""
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Hold")
 
-    # V2 Feature 2: Replace buttons with reminder interval options
+    if not is_pitch and third_field:
+        update_row_status(third_field, status="Hold", next_action="Revisit next quarter")
+
+    # Replace buttons with reminder interval options
     updated = _replace_with_hold_reminder_buttons(blocks, email, name)
     await update_message(channel, ts, updated)
 
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done - {name} marked as Hold in tracker. No email sent.\n"
+        f":white_check_mark: Done — {name} marked as Hold. No email sent.\n"
         f"_Choose when to be reminded above._",
+    )
+
+
+async def _handle_duplicate(
+    channel: str, ts: str, blocks: list[dict],
+    email: str, name: str, third_field: str, linear_issue_id: str = "",
+    is_pitch: bool = False,
+):
+    """DUPLICATE: No email sent. Update Linear + confirm."""
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Duplicate")
+
+    updated = _disable_buttons(blocks, "DUPLICATE")
+    await update_message(channel, ts, updated)
+
+    await post_thread_confirmation(
+        channel, ts,
+        f":white_check_mark: Done — {name} marked as Duplicate. No email sent.",
+    )
+
+
+async def _handle_submission_interested(
+    channel: str, ts: str, blocks: list[dict],
+    email: str, name: str, row: str, linear_issue_id: str = "",
+):
+    """INTERESTED (submission): Send handoff email CC Judith + update Linear + sheet + quick-reply buttons."""
+    template = interested_email(name)
+    email_result = send_email(
+        to=email, subject=template["subject"], body=template["body"], cc=template["cc"],
+    )
+
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Interested")
+
+    update_row_status(row, status="Interested", next_action="Judith to follow up")
+
+    # Replace original buttons with quick-reply template buttons
+    updated = _replace_with_quick_reply_buttons(blocks, email, name, row)
+    await update_message(channel, ts, updated)
+
+    email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
+    await post_thread_confirmation(
+        channel, ts,
+        f":white_check_mark: Done — handoff email sent to {email_status}, {JUDITH_EMAIL} CCd\n"
+        f"_Optional: click a follow-up button above to send an additional email._",
     )
 
 
 async def _handle_submission_decline(
     channel: str, ts: str, blocks: list[dict],
-    email: str, name: str, row: str,
+    email: str, name: str, row: str, linear_issue_id: str = "",
 ):
-    """DECLINE (submission): Send decline email + update sheet + confirm."""
+    """DECLINE (submission): Send decline email with discount + update Linear + sheet + confirm."""
     template = decline_submission_email(name)
     email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Declined")
 
     update_row_status(row, status="Declined")
 
     updated = _disable_buttons(blocks, "DECLINE")
     await update_message(channel, ts, updated)
 
-    email_status = email if email_result.get("sent") else f"{email} (queued - Gmail not connected)"
+    email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done - decline email sent to {email_status}",
+        f":white_check_mark: Done — decline email (with discount) sent to {email_status}",
+    )
+
+
+async def _handle_submission_decline_no_discount(
+    channel: str, ts: str, blocks: list[dict],
+    email: str, name: str, row: str, linear_issue_id: str = "",
+):
+    """NO DISCOUNT (submission): Send clean decline email + update Linear + sheet + confirm."""
+    template = decline_submission_no_discount_email(name)
+    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+
+    if linear_issue_id:
+        await update_issue_status(linear_issue_id, "Declined (No Discount)")
+
+    update_row_status(row, status="Declined (No Discount)")
+
+    updated = _disable_buttons(blocks, "NO DISCOUNT")
+    await update_message(channel, ts, updated)
+
+    email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
+    await post_thread_confirmation(
+        channel, ts,
+        f":white_check_mark: Done — decline email (no discount) sent to {email_status}",
     )

@@ -9,12 +9,22 @@ def build_pitch_message(
     date: str,
     route: str,
     preview: str,
+    linear_url: str = "",
+    linear_id: str = "",
+    linear_issue_id: str = "",
 ) -> list[dict]:
-    """Build Block Kit message for new pitch notification with APPROVED/DECLINE buttons."""
+    """Build Block Kit message for new pitch with full triage buttons.
+
+    INVARIANT: No email is sent without explicit human button click.
+    Buttons: INTERESTED, HOLD, DECLINE, NO DISCOUNT, DUPLICATE.
+    """
+    # Encode linear_issue_id as 4th field in button value
+    val = f"{sender_email}|||{sender_name}|||{subject}|||{linear_issue_id}"
+    linear_text = f"<{linear_url}|{linear_id}>" if linear_url else ""
     return [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "New sponsorship pitch", "emoji": True},
+            "text": {"type": "plain_text", "text": ":incoming_envelope: New sponsorship pitch", "emoji": True},
         },
         {
             "type": "section",
@@ -35,7 +45,7 @@ def build_pitch_message(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":warning: Nothing sends until you click a button.",
+                    "text": f":warning: Nothing sends until you click a button.{('  ' + linear_text) if linear_text else ''}",
                 }
             ],
         },
@@ -45,17 +55,35 @@ def build_pitch_message(
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "APPROVED", "emoji": True},
+                    "text": {"type": "plain_text", "text": "INTERESTED", "emoji": True},
                     "style": "primary",
-                    "action_id": "pitch_approved",
-                    "value": f"{sender_email}|||{sender_name}|||{subject}",
+                    "action_id": "pitch_interested",
+                    "value": val,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "HOLD", "emoji": True},
+                    "action_id": "pitch_hold",
+                    "value": val,
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "DECLINE", "emoji": True},
                     "style": "danger",
                     "action_id": "pitch_decline",
-                    "value": f"{sender_email}|||{sender_name}|||{subject}",
+                    "value": val,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "NO DISCOUNT", "emoji": True},
+                    "action_id": "pitch_decline_no_discount",
+                    "value": val,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "DUPLICATE", "emoji": True},
+                    "action_id": "pitch_duplicate",
+                    "value": val,
                 },
             ],
         },
@@ -69,7 +97,8 @@ def build_pitch_message(
                         f"_Internal ref \u2014 do not edit:_\n"
                         f"_REPLY_TO_EMAIL: {sender_email}_\n"
                         f"_REPLY_TO_NAME: {sender_name}_\n"
-                        f"_ORIGINAL_SUBJECT: {subject}_"
+                        f"_ORIGINAL_SUBJECT: {subject}_\n"
+                        f"_LINEAR_ID: {linear_issue_id}_"
                     ),
                 }
             ],
@@ -86,18 +115,28 @@ def build_submission_message(
     market: str,
     reach: str,
     partnership_type: str,
-    budget: str,
-    socials: str,
-    used_before: str,
-    pitch: str,
-    sheet_row: str,
-    sheet_url: str,
+    budget: str = "",
+    socials: str = "",
+    used_before: str = "",
+    pitch: str = "",
+    sheet_row: str = "",
+    sheet_url: str = "",
+    linear_url: str = "",
+    linear_id: str = "",
+    linear_issue_id: str = "",
 ) -> list[dict]:
-    """Build Block Kit message for form submission with INTERESTED/HOLD/DECLINE buttons."""
+    """Build Block Kit message for form submission with full triage buttons.
+
+    INVARIANT: No email is sent without explicit human button click.
+    Buttons: INTERESTED, HOLD, DECLINE, NO DISCOUNT, DUPLICATE.
+    """
+    # Encode linear_issue_id as 4th field in button value
+    val = f"{email}|||{full_name}|||{sheet_row}|||{linear_issue_id}"
+    linear_text = f"<{linear_url}|{linear_id}>" if linear_url else ""
     return [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "New partnership form submission", "emoji": True},
+            "text": {"type": "plain_text", "text": ":clipboard: New partnership form submission", "emoji": True},
         },
         {
             "type": "section",
@@ -130,6 +169,15 @@ def build_submission_message(
         },
         {"type": "divider"},
         {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f":warning: Nothing sends until you click a button.{('  ' + linear_text) if linear_text else ''}",
+                }
+            ],
+        },
+        {
             "type": "actions",
             "block_id": "submission_actions",
             "elements": [
@@ -138,20 +186,32 @@ def build_submission_message(
                     "text": {"type": "plain_text", "text": "INTERESTED", "emoji": True},
                     "style": "primary",
                     "action_id": "submission_interested",
-                    "value": f"{email}|||{full_name}|||{sheet_row}",
+                    "value": val,
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "HOLD", "emoji": True},
                     "action_id": "submission_hold",
-                    "value": f"{email}|||{full_name}|||{sheet_row}",
+                    "value": val,
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "DECLINE", "emoji": True},
                     "style": "danger",
                     "action_id": "submission_decline",
-                    "value": f"{email}|||{full_name}|||{sheet_row}",
+                    "value": val,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "NO DISCOUNT", "emoji": True},
+                    "action_id": "submission_decline_no_discount",
+                    "value": val,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "DUPLICATE", "emoji": True},
+                    "action_id": "submission_duplicate",
+                    "value": val,
                 },
             ],
         },
@@ -165,7 +225,8 @@ def build_submission_message(
                         f"_Internal ref \u2014 do not edit:_\n"
                         f"_SUBMITTER_EMAIL: {email}_\n"
                         f"_SUBMITTER_NAME: {full_name}_\n"
-                        f"_SHEET_ROW: {sheet_row}_"
+                        f"_SHEET_ROW: {sheet_row}_\n"
+                        f"_LINEAR_ID: {linear_issue_id}_"
                     ),
                 }
             ],
