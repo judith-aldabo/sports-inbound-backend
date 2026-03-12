@@ -10,7 +10,13 @@ SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 SPORTS_INBOUND_CHANNEL = os.getenv("SPORTS_INBOUND_CHANNEL", "C0AKR508SDN")
 
 # Google Sheets
-GDRIVE_JSON_KEY = os.getenv("GDRIVE_JSON_KEY", "")
+# Support env var OR Render secret file at /etc/secrets/gdrive_key.json
+_gdrive_key_path = "/etc/secrets/gdrive_key.json"
+if os.path.exists(_gdrive_key_path):
+    with open(_gdrive_key_path) as _f:
+        GDRIVE_JSON_KEY = _f.read().strip()
+else:
+    GDRIVE_JSON_KEY = os.getenv("GDRIVE_JSON_KEY", "")
 RESPONSE_SHEET_ID = "16xR18SLY5NmTqQYgttR4k_zq6iFRDuLGhIKslR6ioLQ"
 
 # Linear
