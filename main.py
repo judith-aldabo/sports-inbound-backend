@@ -343,6 +343,23 @@ async def healthz():
     return {"status": "ok"}
 
 
+@app.post("/api/health-report")
+async def health_report(request: Request):
+    """Receive daily health check report from Apps Script and post to Slack."""
+    body = await request.json()
+    secret = request.headers.get("X-Webhook-Secret", "")
+    if secret != WEBHOOK_SECRET:
+        return {"ok": False, "error": "unauthorized"}
+
+    report_text = body.get("report", "No report content")
+    try:
+        post_message(SPORTS_INBOUND_CHANNEL, report_text)
+        return {"ok": True, "message": "Health report posted to Slack"}
+    except Exception as e:
+        logging.error("Failed to post health report: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # API: Custom form submission (branded landing page)
 # ---------------------------------------------------------------------------
