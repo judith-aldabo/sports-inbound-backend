@@ -13,17 +13,17 @@ def approved_email(recipient_name: str, original_subject: str, form_url: str = "
     link = form_url or FORM_URL
     plain_body = f"""Hi {recipient_name},
 
-Thank you for reaching out. We've reviewed your pitch and would like to learn more.
+Thanks for reaching out. We'd like to learn more about this opportunity.
 
-To help us properly assess the opportunity, please take 3 minutes to complete our partnership form: {link}
+Please take a few minutes to fill out our partnership form so we can properly evaluate the fit: {link}
 
-We'll be in touch once we've reviewed your submission.
+We'll follow up once we've reviewed your submission.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>Thank you for reaching out. We've reviewed your pitch and would like to learn more.</p>
-<p>To help us properly assess the opportunity, please take 3 minutes to complete our <a href="{link}">partnership form</a>.</p>
-<p>We'll be in touch once we've reviewed your submission.</p>
+<p>Thanks for reaching out. We'd like to learn more about this opportunity.</p>
+<p>Please take a few minutes to fill out our <a href="{link}">partnership form</a> so we can properly evaluate the fit.</p>
+<p>We'll follow up once we've reviewed your submission.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": f"Re: {original_subject}",
@@ -41,24 +41,21 @@ def decline_pitch_email(recipient_name: str, original_subject: str) -> dict:
 
 Thank you for reaching out about a partnership with Eight Sleep.
 
-While we\u2019re not moving forward with a partnership at this time, we want you to have the same competitive advantage our athletes already use every night.
+We\u2019re not able to move forward with a partnership at this time, but we still want you to have what our athletes use every night.
 
-Sleep is where performance is built. Deep, quality sleep is the one recovery tool that changes everything \u2014 reaction time, endurance, mental sharpness, injury resilience.
+Deep sleep is the one recovery tool that changes everything \u2014 reaction time, endurance, mental sharpness, injury resilience. It\u2019s where real performance is built.
 
-As a thank you for reaching out, here's an exclusive offer: visit www.eightsleep.com and use code DEEPSLEEPATHLETE at checkout.
+As a thank you for reaching out: visit www.eightsleep.com and use code DEEPSLEEPATHLETE at checkout for an exclusive discount.
 
-This is the same technology trusted by athletes competing at the highest level in Formula 1, cycling, and beyond.
-
-If things change down the road, don\u2019t hesitate to reach out again \u2014 we\u2019d be happy to revisit.
+If things change down the road, don\u2019t hesitate to reach out again.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
 <p>Thank you for reaching out about a partnership with Eight Sleep.</p>
-<p>While we\u2019re not moving forward with a partnership at this time, we want you to have the same competitive advantage our athletes already use every night.</p>
-<p>Sleep is where performance is built. Deep, quality sleep is the one recovery tool that changes everything \u2014 reaction time, endurance, mental sharpness, injury resilience.</p>
-<p>As a thank you for reaching out, here's an exclusive offer: visit <a href="https://www.eightsleep.com">www.eightsleep.com</a> and use code <strong>DEEPSLEEPATHLETE</strong> at checkout.</p>
-<p>This is the same technology trusted by athletes competing at the highest level in Formula 1, cycling, and beyond.</p>
-<p>If things change down the road, don\u2019t hesitate to reach out again \u2014 we\u2019d be happy to revisit.</p>
+<p>We\u2019re not able to move forward with a partnership at this time, but we still want you to have what our athletes use every night.</p>
+<p>Deep sleep is the one recovery tool that changes everything \u2014 reaction time, endurance, mental sharpness, injury resilience. It\u2019s where real performance is built.</p>
+<p>As a thank you for reaching out: visit <a href="https://www.eightsleep.com">www.eightsleep.com</a> and use code <strong>DEEPSLEEPATHLETE</strong> at checkout for an exclusive discount.</p>
+<p>If things change down the road, don\u2019t hesitate to reach out again.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "Your Partnership Inquiry \u2014 Eight Sleep Sports",
@@ -71,11 +68,11 @@ def submission_acknowledge_email(recipient_name: str) -> dict:
     """Auto-acknowledge email sent when form is submitted."""
     plain_body = f"""Hi {recipient_name},
 
-Thank you for submitting your partnership proposal to Eight Sleep. We review all submissions on a rolling basis and will be in touch if there's a fit.
+Thanks for submitting your partnership proposal. We review every submission and will be in touch if there's a fit.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>Thank you for submitting your partnership proposal to Eight Sleep. We review all submissions on a rolling basis and will be in touch if there's a fit.</p>
+<p>Thanks for submitting your partnership proposal. We review every submission and will be in touch if there's a fit.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "We received your Eight Sleep partnership proposal",
@@ -88,14 +85,14 @@ def interested_email(recipient_name: str) -> dict:
     """Handoff email sent after INTERESTED — CC's Judith."""
     plain_body = f"""Hi {recipient_name},
 
-Thank you for submitting your proposal \u2014 we've had a chance to review it and would love to explore this further.
+We've reviewed your proposal and would love to explore this further.
 
-I'm looping in Judith Aldab\u00f3, our Sports Manager, who will be your main point of contact from here.
+I'm looping in Judith Aldab\u00f3, our Sports Partnerships Manager, who will be your point of contact from here.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>Thank you for submitting your proposal \u2014 we've had a chance to review it and would love to explore this further.</p>
-<p>I'm looping in Judith Aldab\u00f3, our Sports Manager, who will be your main point of contact from here.</p>
+<p>We've reviewed your proposal and would love to explore this further.</p>
+<p>I'm looping in Judith Aldab\u00f3, our Sports Partnerships Manager, who will be your point of contact from here.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "Re: Your Eight Sleep Partnership Proposal",
@@ -112,26 +109,23 @@ def decline_submission_email(recipient_name: str) -> dict:
     """
     plain_body = f"""Hi {recipient_name},
 
-We read every proposal we receive. Yours was no exception.
+We read every proposal we receive, and we appreciate the time you put into yours.
 
-We’re not in a position to move forward commercially right now — but we want to be direct with you: that says nothing about what you’re building. Timing and fit are their own thing.
+We're not able to move forward right now \u2014 but that's about timing and fit, not a reflection on what you're building.
 
-What we do know is that serious athletes deserve serious recovery. Deep sleep isn’t passive — it’s where strength is rebuilt, decisions sharpen, and the body does the work no training session can replicate.
+What we do know: serious athletes deserve serious recovery. Deep sleep is where strength is rebuilt and the body does the work no training session can replicate.
 
-We want you to have that edge — visit www.eightsleep.com and use code DEEPSLEEPATHLETE at checkout.
+We want you to have that edge \u2014 visit www.eightsleep.com and use code DEEPSLEEPATHLETE at checkout.
 
-This is the technology our partners use every night before they compete. Now it’s available to you.
-
-If things change down the road, don’t hesitate to reach out again.
+If things change down the road, don't hesitate to reach out again.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>We read every proposal we receive. Yours was no exception.</p>
-<p>We’re not in a position to move forward commercially right now — but we want to be direct with you: that says nothing about what you’re building. Timing and fit are their own thing.</p>
-<p>What we do know is that serious athletes deserve serious recovery. Deep sleep isn’t passive — it’s where strength is rebuilt, decisions sharpen, and the body does the work no training session can replicate.</p>
-<p>We want you to have that edge — visit <a href="https://www.eightsleep.com">www.eightsleep.com</a> and use code <strong>DEEPSLEEPATHLETE</strong> at checkout.</p>
-<p>This is the technology our partners use every night before they compete. Now it’s available to you.</p>
-<p>If things change down the road, don’t hesitate to reach out again.</p>
+<p>We read every proposal we receive, and we appreciate the time you put into yours.</p>
+<p>We're not able to move forward right now \u2014 but that's about timing and fit, not a reflection on what you're building.</p>
+<p>What we do know: serious athletes deserve serious recovery. Deep sleep is where strength is rebuilt and the body does the work no training session can replicate.</p>
+<p>We want you to have that edge \u2014 visit <a href="https://www.eightsleep.com">www.eightsleep.com</a> and use code <strong>DEEPSLEEPATHLETE</strong> at checkout.</p>
+<p>If things change down the road, don't hesitate to reach out again.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "Your Partnership Proposal — Eight Sleep Sports",
@@ -197,14 +191,14 @@ def schedule_call_email(recipient_name: str) -> dict:
     """Follow-up email to schedule a call after INTERESTED."""
     plain_body = f"""Hi {recipient_name},
 
-Thank you again for your interest in partnering with Eight Sleep. We'd love to learn more about your proposal.
+We'd love to learn more about this opportunity. Would you be available for a brief call this week or next?
 
-Would you be available for a brief call this week or next? Please share a few times that work for you and we'll get something on the calendar.
+Please share a few times that work and we'll get something on the calendar.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>Thank you again for your interest in partnering with Eight Sleep. We'd love to learn more about your proposal.</p>
-<p>Would you be available for a brief call this week or next? Please share a few times that work for you and we'll get something on the calendar.</p>
+<p>We'd love to learn more about this opportunity. Would you be available for a brief call this week or next?</p>
+<p>Please share a few times that work and we'll get something on the calendar.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "Re: Your Eight Sleep Partnership Proposal - Let's Schedule a Call",
@@ -218,14 +212,14 @@ def request_media_kit_email(recipient_name: str) -> dict:
     """Follow-up email requesting a media kit after INTERESTED."""
     plain_body = f"""Hi {recipient_name},
 
-Thank you for your interest in partnering with Eight Sleep. We'd like to learn more about your reach and audience.
+We'd like to learn more about your reach and audience. Could you send over a media kit or any relevant materials (audience demographics, engagement metrics, past brand partnerships)?
 
-Could you please send over your media kit or any relevant materials (audience demographics, engagement metrics, past brand partnerships, etc.)? This will help us evaluate alignment and next steps.
+This will help us evaluate the fit and determine next steps.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>Thank you for your interest in partnering with Eight Sleep. We'd like to learn more about your reach and audience.</p>
-<p>Could you please send over your media kit or any relevant materials (audience demographics, engagement metrics, past brand partnerships, etc.)? This will help us evaluate alignment and next steps.</p>
+<p>We'd like to learn more about your reach and audience. Could you send over a media kit or any relevant materials (audience demographics, engagement metrics, past brand partnerships)?</p>
+<p>This will help us evaluate the fit and determine next steps.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "Re: Your Eight Sleep Partnership Proposal - Media Kit Request",
@@ -239,14 +233,14 @@ def request_rate_card_email(recipient_name: str) -> dict:
     """Follow-up email requesting a rate card after INTERESTED."""
     plain_body = f"""Hi {recipient_name},
 
-Thank you for your interest in partnering with Eight Sleep. We'd love to understand your pricing structure.
+We'd love to understand your pricing structure. Could you share a rate card or breakdown of partnership tiers and pricing?
 
-Could you share your rate card or a breakdown of partnership tiers and pricing? This will help us assess the opportunity and determine next steps.
+This will help us assess the opportunity and move things forward.
 
 {SIGNATURE}"""
     html_body = f"""<p>Hi {recipient_name},</p>
-<p>Thank you for your interest in partnering with Eight Sleep. We'd love to understand your pricing structure.</p>
-<p>Could you share your rate card or a breakdown of partnership tiers and pricing? This will help us assess the opportunity and determine next steps.</p>
+<p>We'd love to understand your pricing structure. Could you share a rate card or breakdown of partnership tiers and pricing?</p>
+<p>This will help us assess the opportunity and move things forward.</p>
 <p>{HTML_SIGNATURE}</p>"""
     return {
         "subject": "Re: Your Eight Sleep Partnership Proposal - Rate Card Request",

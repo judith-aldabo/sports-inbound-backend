@@ -4,10 +4,12 @@ import json
 import hashlib
 import hmac
 import logging
+import os
 import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, Request, Response
@@ -62,9 +64,66 @@ _issue_status_cache: dict[str, str] = {}
 _poller_initialized = False
 POLL_INTERVAL_SECONDS = 60
 
-# Dedup: track which issue+status emails we've already sent this session
-# Prevents duplicate emails during blue-green deployments or retries
-_processed_transitions: set[str] = set()
+# Dedup: track which issue+status emails we've already sent
+# Persisted to disk so it survives backend restarts (Gap 3 fix)
+_DEDUP_FILE = Path("/tmp/sports_inbound_dedup.json")
+_DEDUP_TTL_HOURS = 48  # Auto-expire entries older than 48h
+
+
+def _load_dedup_set() -> set[str]:
+    """Load processed transitions from disk. Entries auto-expire after TTL."""
+    if not _DEDUP_FILE.exists():
+        return set()
+    try:
+        data = json.loads(_DEDUP_FILE.read_text())
+        now = time.time()
+        live: set[str] = set()
+        for key, ts in data.items():
+            if now - ts < _DEDUP_TTL_HOURS * 3600:
+                live.add(key)
+        return live
+    except Exception:
+        return set()
+
+
+def _save_dedup_set(transitions: set[str]):
+    """Persist processed transitions to disk with timestamps."""
+    try:
+        # Load existing timestamps, update with new entries
+        existing: dict[str, float] = {}
+        if _DEDUP_FILE.exists():
+            try:
+                existing = json.loads(_DEDUP_FILE.read_text())
+            except Exception:
+                pass
+        now = time.time()
+        # Add new entries, keep existing timestamps
+        for key in transitions:
+            if key not in existing:
+                existing[key] = now
+        # Prune expired entries
+        pruned = {k: v for k, v in existing.items() if now - v < _DEDUP_TTL_HOURS * 3600}
+        _DEDUP_FILE.write_text(json.dumps(pruned))
+    except Exception as e:
+        logger.warning("Failed to save dedup file: %s", e)
+
+
+_processed_transitions: set[str] = _load_dedup_set()
+logger_init = logging.getLogger(__name__)
+logger_init.info("Loaded %d dedup entries from disk", len(_processed_transitions))
+
+
+def _mark_transition_handled(issue_id: str, new_status: str):
+    """Mark a transition as handled by a button click so the poller and webhook skip it.
+
+    Updates both the in-memory poller cache (prevents poller from detecting
+    the status change) and the processed-transitions set (prevents both poller
+    and webhook from re-sending the email). Persists to disk.
+    """
+    if issue_id:
+        _issue_status_cache[issue_id] = new_status
+        _processed_transitions.add(f"{issue_id}:{new_status}")
+        _save_dedup_set(_processed_transitions)
 
 # Disable CORS. Do not remove this for full-stack development.
 app.add_middleware(
@@ -80,7 +139,31 @@ app.add_middleware(
 async def start_linear_poller():
     """Start the background Linear poller on app startup."""
     asyncio.create_task(_linear_poll_loop())
+    asyncio.create_task(_keep_alive_loop())
     logger.info("Linear poller background task started (every %ds)", POLL_INTERVAL_SECONDS)
+
+
+KEEP_ALIVE_INTERVAL = 120  # Ping self every 2 minutes to prevent Fly.io auto-suspend
+
+
+async def _keep_alive_loop():
+    """Self-ping to prevent Fly.io from auto-suspending the machine.
+
+    Fly.io suspends idle machines, but Slack button clicks have a 3-second
+    timeout. If the machine is suspended, it takes too long to wake up and
+    Slack shows an error. This loop keeps the machine alive.
+    """
+    import httpx
+    await asyncio.sleep(10)  # Wait for app to start
+    logger.info("Keep-alive loop started (every %ds)", KEEP_ALIVE_INTERVAL)
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get("http://localhost:8000/healthz", timeout=5)
+                logger.debug("Keep-alive ping: %s", resp.status_code)
+        except Exception as e:
+            logger.debug("Keep-alive ping failed (expected during shutdown): %s", e)
+        await asyncio.sleep(KEEP_ALIVE_INTERVAL)
 
 
 async def _linear_poll_loop():
@@ -176,9 +259,11 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
         if await check_email_sent_marker(issue_id, new_status):
             logger.info("Skipping duplicate transition for %s -> %s (marker found in Linear)", issue_id, new_status)
             _processed_transitions.add(dedup_key)
+            _save_dedup_set(_processed_transitions)
             return
 
     _processed_transitions.add(dedup_key)
+    _save_dedup_set(_processed_transitions)
 
     issue = await get_issue_details(issue_id)
     if not issue.get("ok"):
@@ -223,11 +308,13 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             template = approved_email(recipient_name, _parse_subject_from_title(title), form_url=prefilled_url)
         else:
             template = interested_email(recipient_name)
+        await add_email_sent_marker(issue_id, new_status)  # Write marker BEFORE sending
         email_result = send_email(
             to=recipient_email,
             subject=template["subject"],
             body=template["body"],
             cc=template.get("cc", ""),
+            html_body=template.get("html_body", ""),
         )
         slack_text = f":white_check_mark: *{identifier}* → *Interested*"
 
@@ -236,7 +323,8 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             template = decline_pitch_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
 
     elif new_status == "Declined (No Discount)":
@@ -244,14 +332,16 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             template = decline_pitch_no_discount_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_no_discount_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined (No Discount)*"
 
     elif new_status == "Approved":
         prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
         subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
         template = approved_email(recipient_name, subject, form_url=prefilled_url)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":tada: *{identifier}* → *Approved*"
 
     else:
@@ -270,10 +360,6 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
             text=f"{identifier} moved to {new_status}",
         )
         return
-
-    # Mark as sent in Linear for cross-machine dedup
-    if email_result.get("sent"):
-        await add_email_sent_marker(issue_id, new_status)
 
     # Post Slack notification for email-triggering status changes
     if email_result.get("sent"):
@@ -304,6 +390,23 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+@app.post("/api/health-report")
+async def health_report(request: Request):
+    """Receive daily health check report from Apps Script and post to Slack."""
+    body = await request.json()
+    secret = request.headers.get("X-Webhook-Secret", "")
+    if secret != WEBHOOK_SECRET:
+        return {"ok": False, "error": "unauthorized"}
+
+    report_text = body.get("report", "No report content")
+    try:
+        post_message(SPORTS_INBOUND_CHANNEL, report_text)
+        return {"ok": True, "message": "Health report posted to Slack"}
+    except Exception as e:
+        logging.error("Failed to post health report: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +486,7 @@ async def api_form_submission(request: Request):
 
     # 4. Send auto-acknowledge email
     ack = submission_acknowledge_email(full_name)
-    email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"])
+    email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"], html_body=ack.get("html_body", ""))
 
     return {
         "ok": True,
@@ -400,13 +503,11 @@ async def api_form_submission(request: Request):
 # Helper: Build pre-filled form URL (V2 Feature 5)
 # ---------------------------------------------------------------------------
 def _build_prefilled_form_url(name: str, email: str) -> str:
-    """Build a Google Forms URL with name and email pre-filled."""
-    # Google Forms prefill uses entry IDs from the form
-    # For now, use the viewform URL with prefill params
-    base = f"https://docs.google.com/forms/d/e/{FORM_EDIT_ID}/viewform"
+    """Build a branded form URL with name and email pre-filled."""
+    base = FORM_URL  # https://judith-aldabo.github.io/sports-partnership-form/
     params = urlencode({
-        "entry.1": name,      # Full Name field
-        "entry.2": email,     # Email field
+        "name": name,
+        "email": email,
     })
     return f"{base}?{params}"
 
@@ -559,7 +660,7 @@ async def webhook_new_submission(request: Request):
 
     # 3. Send auto-acknowledge email to submitter
     ack = submission_acknowledge_email(full_name)
-    email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"])
+    email_result = send_email(to=email_addr, subject=ack["subject"], body=ack["body"], html_body=ack.get("html_body", ""))
 
     return {
         "ok": slack_result.get("ok", False),
@@ -638,22 +739,17 @@ async def slack_interactions(request: Request):
     # Dispatch based on action_id
     # --- Primary triage actions (all with undo grace period) ---
     # INVARIANT: No email is sent without explicit human button click (Judith Aldabo).
-    if action_id == "pitch_interested":
+    if action_id in ("pitch_send_form", "pitch_interested", "pitch_approved"):
+        # pitch_interested and pitch_approved are legacy aliases
         await _start_pending_action(
-            "pitch_interested", channel_id, message_ts, original_blocks,
+            "pitch_send_form", channel_id, message_ts, original_blocks,
             recipient_email, recipient_name, third_field, linear_issue_id,
         )
 
-    elif action_id == "pitch_approved":
-        # Legacy alias for pitch_interested
+    elif action_id in ("pitch_decline_w_code", "pitch_decline"):
+        # pitch_decline is legacy alias
         await _start_pending_action(
-            "pitch_interested", channel_id, message_ts, original_blocks,
-            recipient_email, recipient_name, third_field, linear_issue_id,
-        )
-
-    elif action_id == "pitch_decline":
-        await _start_pending_action(
-            "pitch_decline", channel_id, message_ts, original_blocks,
+            "pitch_decline_w_code", channel_id, message_ts, original_blocks,
             recipient_email, recipient_name, third_field, linear_issue_id,
         )
 
@@ -677,9 +773,10 @@ async def slack_interactions(request: Request):
             is_pitch=True,
         )
 
-    elif action_id == "submission_interested":
+    elif action_id in ("submission_loop_in_judith", "submission_interested"):
+        # submission_interested is legacy alias
         await _start_pending_action(
-            "submission_interested", channel_id, message_ts, original_blocks,
+            "submission_loop_in_judith", channel_id, message_ts, original_blocks,
             recipient_email, recipient_name, third_field, linear_issue_id,
         )
 
@@ -690,9 +787,10 @@ async def slack_interactions(request: Request):
             is_pitch=False,
         )
 
-    elif action_id == "submission_decline":
+    elif action_id in ("submission_decline_w_code", "submission_decline"):
+        # submission_decline is legacy alias
         await _start_pending_action(
-            "submission_decline", channel_id, message_ts, original_blocks,
+            "submission_decline_w_code", channel_id, message_ts, original_blocks,
             recipient_email, recipient_name, third_field, linear_issue_id,
         )
 
@@ -735,24 +833,67 @@ async def slack_interactions(request: Request):
 # V2 Feature 1: Undo system
 # ---------------------------------------------------------------------------
 
+# Map action_type -> Linear status that will be set when the action executes.
+# Used to mark transitions as handled IMMEDIATELY (before the undo delay)
+# so the poller and webhook never race and duplicate the email.
+_ACTION_TARGET_STATUS: dict[str, str] = {
+    "pitch_send_form": "Interested",
+    "pitch_interested": "Interested",
+    "pitch_approved": "Interested",
+    "pitch_decline_w_code": "Declined",
+    "pitch_decline": "Declined",
+    "pitch_decline_no_discount": "Declined (No Discount)",
+    "submission_loop_in_judith": "Interested",
+    "submission_interested": "Interested",
+    "submission_decline_w_code": "Declined",
+    "submission_decline": "Declined",
+    "submission_decline_no_discount": "Declined (No Discount)",
+}
+
+
 async def _start_pending_action(
     action_type: str,
     channel: str, ts: str, blocks: list[dict],
     email: str, name: str, third_field: str, linear_issue_id: str = "",
 ):
-    """Replace buttons with a countdown + UNDO button. Execute after UNDO_WINDOW_SECONDS."""
+    """Replace buttons with a countdown + UNDO button. Execute after UNDO_WINDOW_SECONDS.
+
+    CRITICAL: We mark the transition as handled IMMEDIATELY — before the undo
+    delay — so the Linear poller (every 60 s) and the Linear webhook cannot
+    race and fire a duplicate email during the 10-second undo window.
+    Two layers:
+      1. In-memory (_issue_status_cache + _processed_transitions) — fast,
+         prevents the poller from even detecting the change.
+      2. Persistent (Linear comment marker) — survives OOM / restart.
+    """
     pending_id = str(uuid.uuid4())[:8]
 
     action_labels = {
-        "pitch_interested": "INTERESTED",
-        "pitch_approved": "INTERESTED",
-        "pitch_decline": "DECLINE",
-        "pitch_decline_no_discount": "NO DISCOUNT",
-        "submission_interested": "INTERESTED",
-        "submission_decline": "DECLINE",
-        "submission_decline_no_discount": "NO DISCOUNT",
+        "pitch_send_form": "SEND FORM",
+        "pitch_interested": "SEND FORM",  # legacy
+        "pitch_approved": "SEND FORM",    # legacy
+        "pitch_decline_w_code": "DECLINE W CODE",
+        "pitch_decline": "DECLINE W CODE",  # legacy
+        "pitch_decline_no_discount": "DECLINE NO DISCOUNT",
+        "submission_loop_in_judith": "LOOP IN JUDITH",
+        "submission_interested": "LOOP IN JUDITH",  # legacy
+        "submission_decline_w_code": "DECLINE W CODE",
+        "submission_decline": "DECLINE W CODE",  # legacy
+        "submission_decline_no_discount": "DECLINE NO DISCOUNT",
     }
     label = action_labels.get(action_type, action_type.upper())
+
+    # ── DEDUP: mark IMMEDIATELY, BEFORE the undo delay ──────────────────
+    target_status = _ACTION_TARGET_STATUS.get(action_type, "")
+    if linear_issue_id and target_status:
+        # Layer 1 — in-memory (prevents poller from detecting change)
+        _mark_transition_handled(linear_issue_id, target_status)
+        # Layer 2 — persistent marker in Linear (survives OOM / restart)
+        await add_email_sent_marker(linear_issue_id, target_status)
+        logger.info(
+            "Dedup: pre-marked %s -> %s BEFORE undo delay",
+            linear_issue_id[:12], target_status,
+        )
 
     # Replace buttons with pending state + UNDO button
     pending_blocks = _replace_with_undo(blocks, label, pending_id, email, name, third_field)
@@ -792,16 +933,16 @@ async def _execute_after_delay(pending_id: str):
     third_field = pending["third_field"]
     linear_id = pending.get("linear_issue_id", "")
 
-    if action_type == "pitch_interested":
-        await _handle_pitch_interested(channel, ts, blocks, email, name, third_field, linear_id)
-    elif action_type == "pitch_decline":
-        await _handle_pitch_decline(channel, ts, blocks, email, name, third_field, linear_id)
+    if action_type in ("pitch_send_form", "pitch_interested"):
+        await _handle_pitch_send_form(channel, ts, blocks, email, name, third_field, linear_id)
+    elif action_type in ("pitch_decline_w_code", "pitch_decline"):
+        await _handle_pitch_decline_w_code(channel, ts, blocks, email, name, third_field, linear_id)
     elif action_type == "pitch_decline_no_discount":
         await _handle_pitch_decline_no_discount(channel, ts, blocks, email, name, third_field, linear_id)
-    elif action_type == "submission_interested":
-        await _handle_submission_interested(channel, ts, blocks, email, name, third_field, linear_id)
-    elif action_type == "submission_decline":
-        await _handle_submission_decline(channel, ts, blocks, email, name, third_field, linear_id)
+    elif action_type in ("submission_loop_in_judith", "submission_interested"):
+        await _handle_submission_loop_in_judith(channel, ts, blocks, email, name, third_field, linear_id)
+    elif action_type in ("submission_decline_w_code", "submission_decline"):
+        await _handle_submission_decline_w_code(channel, ts, blocks, email, name, third_field, linear_id)
     elif action_type == "submission_decline_no_discount":
         await _handle_submission_decline_no_discount(channel, ts, blocks, email, name, third_field, linear_id)
 
@@ -905,7 +1046,7 @@ async def _handle_quick_reply(
 
     email_result = send_email(
         to=email, subject=template["subject"], body=template["body"],
-        cc=template.get("cc", ""),
+        cc=template.get("cc", ""), html_body=template.get("html_body", ""),
     )
 
     # Replace quick-reply buttons with confirmation
@@ -994,21 +1135,41 @@ def _parse_email_from_description(description: str) -> tuple[str, str]:
     # For form submissions: look for Name field in table
     name_match = re.search(r"\*\*Name\*\*\s*\|\s*(.+?)(?:\s*\||\n)", description)
     if name_match:
-        return email, name_match.group(1).strip()
+        return email, _clean_name(name_match.group(1).strip())
 
     # For pitches: look for From field
     from_match = re.search(r"\*\*From:\*\*\s*(.+?)\s*<", description)
     if from_match:
-        return email, from_match.group(1).strip()
+        return email, _clean_name(from_match.group(1).strip())
 
     # Fallback: try title parsing
     return email, ""
 
 
+def _clean_name(name: str) -> str:
+    """Strip markdown link artifacts and email fragments from a parsed name.
+
+    Linear auto-formats emails as [email](mailto:email), which can leak into
+    name fields when parsed from descriptions. Also strips stray brackets,
+    parentheses, and angle brackets.
+    """
+    # Remove markdown link patterns like [text](url)
+    name = re.sub(r'\[([^\]]*)]\([^)]*\)', r'\1', name)
+    # Remove any leftover <email> or (email) fragments
+    name = re.sub(r'<[^>]*>', '', name)
+    name = re.sub(r'\([^)]*@[^)]*\)', '', name)
+    # Remove stray brackets and parens
+    name = re.sub(r'[\[\]()]', '', name)
+    # Remove email addresses that leaked in
+    name = re.sub(r'\S+@\S+', '', name)
+    # Collapse whitespace
+    return re.sub(r'\s+', ' ', name).strip()
+
+
 def _parse_name_from_title(title: str) -> str:
     """Extract name from Linear issue title like '[Form] Name — Org (Sport)' or '[Pitch] Name — Subject'."""
     match = re.match(r"\[(?:Form|Pitch)\]\s*(.+?)\s*[—\-]", title)
-    return match.group(1).strip() if match else ""
+    return _clean_name(match.group(1).strip()) if match else ""
 
 
 def _parse_subject_from_title(title: str) -> str:
@@ -1088,6 +1249,18 @@ async def webhook_linear(request: Request):
 
     is_pitch = "Email Pitch" in labels or title.startswith("[Pitch]")
 
+    # Dedup layer 1: fast in-memory check (catches button-click-originated transitions instantly)
+    dedup_key = f"{issue_id}:{new_status}"
+    if dedup_key in _processed_transitions:
+        logger.info("Webhook: skipping %s → %s (in-memory dedup)", identifier, new_status)
+        return {"ok": True, "status_changed": new_status, "email_sent": False, "reason": "Dedup: already sent (in-memory)"}
+
+    # Dedup layer 2: cross-machine via Linear comments (survives restarts)
+    if new_status in {"Interested", "Declined", "Declined (No Discount)", "Approved"}:
+        if await check_email_sent_marker(issue_id, new_status):
+            logger.info("Webhook: skipping %s → %s (dedup marker found)", identifier, new_status)
+            return {"ok": True, "status_changed": new_status, "email_sent": False, "reason": "Dedup: already sent"}
+
     if new_status == "Interested":
         if is_pitch:
             # Pitch → Interested: send form link
@@ -1096,11 +1269,13 @@ async def webhook_linear(request: Request):
         else:
             # Submission → Interested: send handoff email CC Judith
             template = interested_email(recipient_name)
+        await add_email_sent_marker(issue_id, new_status)  # Write marker BEFORE sending
         email_result = send_email(
             to=recipient_email,
             subject=template["subject"],
             body=template["body"],
             cc=template.get("cc", ""),
+            html_body=template.get("html_body", ""),
         )
         slack_text = f":white_check_mark: *{identifier}* → *Interested*"
 
@@ -1109,7 +1284,8 @@ async def webhook_linear(request: Request):
             template = decline_pitch_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined*"
 
     elif new_status == "Declined (No Discount)":
@@ -1117,14 +1293,16 @@ async def webhook_linear(request: Request):
             template = decline_pitch_no_discount_email(recipient_name, _parse_subject_from_title(title))
         else:
             template = decline_submission_no_discount_email(recipient_name)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":no_entry_sign: *{identifier}* → *Declined (No Discount)*"
 
     elif new_status == "Approved":
         prefilled_url = _build_prefilled_form_url(recipient_name, recipient_email)
         subject = _parse_subject_from_title(title) if is_pitch else "Your Eight Sleep Partnership"
         template = approved_email(recipient_name, subject, form_url=prefilled_url)
-        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"])
+        await add_email_sent_marker(issue_id, new_status)
+        email_result = send_email(to=recipient_email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
         slack_text = f":tada: *{identifier}* → *Approved*"
 
     else:
@@ -1302,49 +1480,58 @@ def _disable_buttons(blocks: list[dict], chosen_label: str) -> list[dict]:
 # INVARIANT: No email fires without explicit human button click.
 # ---------------------------------------------------------------------------
 
-async def _handle_pitch_interested(
+async def _handle_pitch_send_form(
     channel: str, ts: str, blocks: list[dict],
     email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
-    """INTERESTED (pitch): Send form link email + update Linear + confirm."""
+    """SEND FORM (pitch): Send form link email + update Linear + confirm.
+
+    NOTE: Dedup marking already happened in _start_pending_action() BEFORE
+    the undo delay. We do NOT re-mark here to avoid wasted API calls.
+    """
+
     prefilled_url = _build_prefilled_form_url(name, email)
     template = approved_email(name, subject, form_url=prefilled_url)
-    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+    email_result = send_email(
+        to=email, subject=template["subject"], body=template["body"],
+        html_body=template.get("html_body", ""),
+    )
 
     # Update Linear status
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Interested")
 
-    # Replace buttons with quick-reply options
-    updated = _replace_with_quick_reply_buttons(blocks, email, name, subject)
+    # For pitches, just disable buttons (no quick-reply — form link is the next step)
+    updated = _disable_buttons(blocks, "SEND FORM")
     await update_message(channel, ts, updated)
 
     email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done — form link sent to {email_status}\n"
-        f"_Optional: click a follow-up button above to send an additional email._",
+        f":white_check_mark: Done — form link sent to {email_status}",
     )
 
 
-async def _handle_pitch_decline(
+async def _handle_pitch_decline_w_code(
     channel: str, ts: str, blocks: list[dict],
     email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
-    """DECLINE (pitch): Send decline email with discount + update Linear + confirm."""
+    """DECLINE W CODE (pitch): Send decline email with discount + update Linear + confirm."""
+    # Dedup marking already done in _start_pending_action()
+
     template = decline_pitch_email(name, subject)
-    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+    email_result = send_email(to=email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
 
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Declined")
 
-    updated = _disable_buttons(blocks, "DECLINE")
+    updated = _disable_buttons(blocks, "DECLINE W CODE")
     await update_message(channel, ts, updated)
 
     email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done — decline email (with discount) sent to {email_status}",
+        f":white_check_mark: Done — decline email (with discount code) sent to {email_status}",
     )
 
 
@@ -1353,13 +1540,15 @@ async def _handle_pitch_decline_no_discount(
     email: str, name: str, subject: str, linear_issue_id: str = "",
 ):
     """NO DISCOUNT (pitch): Send clean decline email + update Linear + confirm."""
+    # Dedup marking already done in _start_pending_action()
+
     template = decline_pitch_no_discount_email(name, subject)
-    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+    email_result = send_email(to=email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
 
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Declined (No Discount)")
 
-    updated = _disable_buttons(blocks, "NO DISCOUNT")
+    updated = _disable_buttons(blocks, "DECLINE NO DISCOUNT")
     await update_message(channel, ts, updated)
 
     email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
@@ -1375,6 +1564,7 @@ async def _handle_hold(
     is_pitch: bool = False,
 ):
     """HOLD: No email sent. Update Linear + sheet + show reminder buttons."""
+    _mark_transition_handled(linear_issue_id, "Hold")
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Hold")
 
@@ -1398,6 +1588,7 @@ async def _handle_duplicate(
     is_pitch: bool = False,
 ):
     """DUPLICATE: No email sent. Update Linear + confirm."""
+    _mark_transition_handled(linear_issue_id, "Duplicate")
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Duplicate")
 
@@ -1410,14 +1601,17 @@ async def _handle_duplicate(
     )
 
 
-async def _handle_submission_interested(
+async def _handle_submission_loop_in_judith(
     channel: str, ts: str, blocks: list[dict],
     email: str, name: str, row: str, linear_issue_id: str = "",
 ):
-    """INTERESTED (submission): Send handoff email CC Judith + update Linear + sheet + quick-reply buttons."""
+    """LOOP IN JUDITH (submission): Send handoff email CC Judith + update Linear + sheet + quick-reply buttons."""
+    # Dedup marking already done in _start_pending_action()
+
     template = interested_email(name)
     email_result = send_email(
-        to=email, subject=template["subject"], body=template["body"], cc=template["cc"],
+        to=email, subject=template["subject"], body=template["body"],
+        cc=template["cc"], html_body=template.get("html_body", ""),
     )
 
     if linear_issue_id:
@@ -1437,26 +1631,28 @@ async def _handle_submission_interested(
     )
 
 
-async def _handle_submission_decline(
+async def _handle_submission_decline_w_code(
     channel: str, ts: str, blocks: list[dict],
     email: str, name: str, row: str, linear_issue_id: str = "",
 ):
-    """DECLINE (submission): Send decline email with discount + update Linear + sheet + confirm."""
+    """DECLINE W CODE (submission): Send decline email with discount + update Linear + sheet + confirm."""
+    # Dedup marking already done in _start_pending_action()
+
     template = decline_submission_email(name)
-    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+    email_result = send_email(to=email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
 
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Declined")
 
     update_row_status(row, status="Declined")
 
-    updated = _disable_buttons(blocks, "DECLINE")
+    updated = _disable_buttons(blocks, "DECLINE W CODE")
     await update_message(channel, ts, updated)
 
     email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
     await post_thread_confirmation(
         channel, ts,
-        f":white_check_mark: Done — decline email (with discount) sent to {email_status}",
+        f":white_check_mark: Done — decline email (with discount code) sent to {email_status}",
     )
 
 
@@ -1465,15 +1661,17 @@ async def _handle_submission_decline_no_discount(
     email: str, name: str, row: str, linear_issue_id: str = "",
 ):
     """NO DISCOUNT (submission): Send clean decline email + update Linear + sheet + confirm."""
+    # Dedup marking already done in _start_pending_action()
+
     template = decline_submission_no_discount_email(name)
-    email_result = send_email(to=email, subject=template["subject"], body=template["body"])
+    email_result = send_email(to=email, subject=template["subject"], body=template["body"], html_body=template.get("html_body", ""))
 
     if linear_issue_id:
         await update_issue_status(linear_issue_id, "Declined (No Discount)")
 
     update_row_status(row, status="Declined (No Discount)")
 
-    updated = _disable_buttons(blocks, "NO DISCOUNT")
+    updated = _disable_buttons(blocks, "DECLINE NO DISCOUNT")
     await update_message(channel, ts, updated)
 
     email_status = email if email_result.get("sent") else f"{email} (:rotating_light: EMAIL FAILED)"
