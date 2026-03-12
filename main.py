@@ -438,7 +438,7 @@ async def api_form_submission(request: Request):
 # ---------------------------------------------------------------------------
 def _build_prefilled_form_url(name: str, email: str) -> str:
     """Build a branded form URL with name and email pre-filled."""
-    base = FORM_URL  # https://form-creator-app-u47y322j.devinapps.com
+    base = FORM_URL  # https://judith-aldabo.github.io/sports-partnership-form/
     params = urlencode({
         "name": name,
         "email": email,

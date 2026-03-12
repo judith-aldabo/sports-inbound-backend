@@ -36,8 +36,8 @@ GMAIL_OAUTH_REFRESH_TOKEN = os.getenv("GMAIL_OAUTH_REFRESH_TOKEN", "")
 GMAIL_OAUTH_CLIENT_ID = os.getenv("GMAIL_OAUTH_CLIENT_ID", "")
 GMAIL_OAUTH_CLIENT_SECRET = os.getenv("GMAIL_OAUTH_CLIENT_SECRET", "")
 
-# Form link (branded form hosted on Devin Apps)
-FORM_URL = "https://form-creator-app-u47y322j.devinapps.com"
+# Form link (branded form hosted on GitHub Pages — always on)
+FORM_URL = "https://judith-aldabo.github.io/sports-partnership-form/"
 FORM_EDIT_ID = "1tvLLDMOTRMwBW0kT16bXvtchO8jU8eIIOsi5FAkr87Q"  # legacy Google Form ID
 
 # Undo window (seconds)
