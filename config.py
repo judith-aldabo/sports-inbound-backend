@@ -36,9 +36,9 @@ GMAIL_OAUTH_REFRESH_TOKEN = os.getenv("GMAIL_OAUTH_REFRESH_TOKEN", "")
 GMAIL_OAUTH_CLIENT_ID = os.getenv("GMAIL_OAUTH_CLIENT_ID", "")
 GMAIL_OAUTH_CLIENT_SECRET = os.getenv("GMAIL_OAUTH_CLIENT_SECRET", "")
 
-# Form link
-FORM_URL = "https://forms.gle/vCeH3KPpEuXR5m5E9"
-FORM_EDIT_ID = "1tvLLDMOTRMwBW0kT16bXvtchO8jU8eIIOsi5FAkr87Q"
+# Form link (branded form hosted on Devin Apps)
+FORM_URL = "https://form-creator-app-u47y322j.devinapps.com"
+FORM_EDIT_ID = "1tvLLDMOTRMwBW0kT16bXvtchO8jU8eIIOsi5FAkr87Q"  # legacy Google Form ID
 
 # Undo window (seconds)
 UNDO_WINDOW_SECONDS = 10
