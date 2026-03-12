@@ -97,7 +97,7 @@ async def get_issue_details(issue_id: str) -> dict:
         }
     }
     """
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             GRAPHQL_URL,
             headers={
@@ -317,7 +317,7 @@ async def create_linear_webhook(webhook_url: str) -> dict:
         }
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             GRAPHQL_URL,
             headers={
@@ -370,7 +370,7 @@ async def _create_issue(
         }
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             GRAPHQL_URL,
             headers={
