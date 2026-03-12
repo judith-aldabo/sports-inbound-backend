@@ -4,10 +4,12 @@ import json
 import hashlib
 import hmac
 import logging
+import os
 import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, Request, Response
@@ -62,9 +64,53 @@ _issue_status_cache: dict[str, str] = {}
 _poller_initialized = False
 POLL_INTERVAL_SECONDS = 60
 
-# Dedup: track which issue+status emails we've already sent this session
-# Prevents duplicate emails during blue-green deployments or retries
-_processed_transitions: set[str] = set()
+# Dedup: track which issue+status emails we've already sent
+# Persisted to disk so it survives backend restarts (Gap 3 fix)
+_DEDUP_FILE = Path("/tmp/sports_inbound_dedup.json")
+_DEDUP_TTL_HOURS = 48  # Auto-expire entries older than 48h
+
+
+def _load_dedup_set() -> set[str]:
+    """Load processed transitions from disk. Entries auto-expire after TTL."""
+    if not _DEDUP_FILE.exists():
+        return set()
+    try:
+        data = json.loads(_DEDUP_FILE.read_text())
+        now = time.time()
+        live: set[str] = set()
+        for key, ts in data.items():
+            if now - ts < _DEDUP_TTL_HOURS * 3600:
+                live.add(key)
+        return live
+    except Exception:
+        return set()
+
+
+def _save_dedup_set(transitions: set[str]):
+    """Persist processed transitions to disk with timestamps."""
+    try:
+        # Load existing timestamps, update with new entries
+        existing: dict[str, float] = {}
+        if _DEDUP_FILE.exists():
+            try:
+                existing = json.loads(_DEDUP_FILE.read_text())
+            except Exception:
+                pass
+        now = time.time()
+        # Add new entries, keep existing timestamps
+        for key in transitions:
+            if key not in existing:
+                existing[key] = now
+        # Prune expired entries
+        pruned = {k: v for k, v in existing.items() if now - v < _DEDUP_TTL_HOURS * 3600}
+        _DEDUP_FILE.write_text(json.dumps(pruned))
+    except Exception as e:
+        logger.warning("Failed to save dedup file: %s", e)
+
+
+_processed_transitions: set[str] = _load_dedup_set()
+logger_init = logging.getLogger(__name__)
+logger_init.info("Loaded %d dedup entries from disk", len(_processed_transitions))
 
 
 def _mark_transition_handled(issue_id: str, new_status: str):
@@ -72,11 +118,12 @@ def _mark_transition_handled(issue_id: str, new_status: str):
 
     Updates both the in-memory poller cache (prevents poller from detecting
     the status change) and the processed-transitions set (prevents both poller
-    and webhook from re-sending the email).
+    and webhook from re-sending the email). Persists to disk.
     """
     if issue_id:
         _issue_status_cache[issue_id] = new_status
         _processed_transitions.add(f"{issue_id}:{new_status}")
+        _save_dedup_set(_processed_transitions)
 
 # Disable CORS. Do not remove this for full-stack development.
 app.add_middleware(
@@ -212,9 +259,11 @@ async def _handle_status_change(issue_id: str, old_status: str, new_status: str)
         if await check_email_sent_marker(issue_id, new_status):
             logger.info("Skipping duplicate transition for %s -> %s (marker found in Linear)", issue_id, new_status)
             _processed_transitions.add(dedup_key)
+            _save_dedup_set(_processed_transitions)
             return
 
     _processed_transitions.add(dedup_key)
+    _save_dedup_set(_processed_transitions)
 
     issue = await get_issue_details(issue_id)
     if not issue.get("ok"):
